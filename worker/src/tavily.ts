@@ -21,6 +21,7 @@ export async function extractPage(env: Env, url: string): Promise<TavilyExtractR
       extract_depth: "basic",
       include_images: false,
     }),
+    signal: AbortSignal.timeout(6_000),
   });
   if (!response.ok) {
     throw new Error(`Tavily Extract: HTTP ${response.status} ${truncate(await response.text(), 300)}`);

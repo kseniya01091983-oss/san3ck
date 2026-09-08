@@ -6,6 +6,7 @@ import {
   clearConversationState,
   createNote,
   deleteNote,
+  failStalePendingNotes,
   getConversationState,
   getNote,
   getNoteApi,
@@ -98,6 +99,7 @@ function paginationKeyboard(notes: NoteApi[], page: number, totalPages: number):
 }
 
 async function sendNotesPage(env: Env, chatId: number, page: number, telegramId: number): Promise<void> {
+  await failStalePendingNotes(env.DB, telegramId);
   const result = await listNotes(env.DB, telegramId, {
     status: null,
     limit: NOTES_PER_PAGE,
@@ -135,7 +137,7 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
     text,
     tags: tagsFromText(text),
     section: "tasks",
-    status: "draft",
+    status: "published",
     processingStatus: "pending",
     metadata: { created_from: "telegram", original_text_saved: true },
   });

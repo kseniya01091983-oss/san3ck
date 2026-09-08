@@ -196,6 +196,33 @@ export async function listNotes(
   };
 }
 
+export async function failStalePendingNotes(
+  db: D1Database,
+  ownerTelegramId: number,
+  olderThanMinutes = 2,
+): Promise<number> {
+  const safeMinutes = Math.min(60, Math.max(1, Math.floor(olderThanMinutes)));
+  const result = await db
+    .prepare(
+      `UPDATE notes
+       SET status = 'published',
+           processing_status = 'failed',
+           metadata_json = json_set(
+             metadata_json,
+             '$.processing_error',
+             'Автоматическая обработка не завершилась вовремя. Исходная запись сохранена.'
+           ),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE owner_telegram_id = ?
+         AND processing_status = 'pending'
+         AND created_at <= datetime('now', ?)
+       RETURNING id`,
+    )
+    .bind(ownerTelegramId, `-${safeMinutes} minutes`)
+    .all<{ id: number }>();
+  return result.results.length;
+}
+
 export async function searchNotesForAnswer(
   db: D1Database,
   ownerTelegramId: number,

@@ -24,6 +24,7 @@ export type MessageAnalysis =
 const GLM_PROVIDERS = ["deepinfra", "novita", "z-ai", "gmicloud"] as const;
 const TEXT_FALLBACK_MODEL = "deepseek/deepseek-v4-flash-0731";
 const FREE_FALLBACK_MODEL = "openrouter/free";
+const ATTEMPT_TIMEOUTS_MS = [15_000, 5_000, 2_500] as const;
 
 function configuredModel(env: Env): string {
   if (!env.OPENROUTER_MODEL || env.OPENROUTER_MODEL === "SET_AFTER_SELECTION") {
@@ -60,23 +61,30 @@ async function openRouter(
   attempts.push({ model: FREE_FALLBACK_MODEL });
 
   const failures: string[] = [];
-  for (const attempt of attempts) {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": env.PUBLIC_BASE_URL,
-        "X-Title": "FastNotes Second Brain",
-      },
-      body: JSON.stringify({
-        model: attempt.model,
-        messages,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        ...(attempt.provider ? { provider: attempt.provider } : {}),
-      }),
-    });
+  for (const [index, attempt] of attempts.entries()) {
+    let response: Response;
+    try {
+      response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": env.PUBLIC_BASE_URL,
+          "X-Title": "FastNotes Second Brain",
+        },
+        body: JSON.stringify({
+          model: attempt.model,
+          messages,
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+          ...(attempt.provider ? { provider: attempt.provider } : {}),
+        }),
+        signal: AbortSignal.timeout(ATTEMPT_TIMEOUTS_MS[index] || 2_500),
+      });
+    } catch (error) {
+      failures.push(`${attempt.model}: ${error instanceof Error ? error.message : "превышено время ожидания"}`);
+      continue;
+    }
     if (!response.ok) {
       failures.push(`${attempt.model}: HTTP ${response.status} ${truncate(await response.text(), 180)}`);
       continue;

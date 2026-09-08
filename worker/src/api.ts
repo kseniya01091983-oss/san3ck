@@ -2,6 +2,7 @@ import { structureTextNote } from "./ai";
 import {
   createNote,
   deleteNote,
+  failStalePendingNotes,
   getAttachment,
   getNote,
   getNoteApi,
@@ -40,6 +41,7 @@ function attachmentIdFromPath(pathname: string): number | null {
 }
 
 async function handleList(request: Request, env: Env, telegramId: number): Promise<Response> {
+  await failStalePendingNotes(env.DB, telegramId);
   const url = new URL(request.url);
   const rawStatus = url.searchParams.get("status");
   const status = rawStatus === "all" ? null : normalizeStatus(rawStatus || "published");

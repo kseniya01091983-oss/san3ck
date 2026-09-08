@@ -5,7 +5,7 @@ import worker from "../src/index";
 import { isAllowedTelegramId } from "../src/access";
 import { createSiteLoginUrl, exchangeSiteToken, getSiteSessionTelegramId, hasSiteSession } from "../src/auth";
 import { structureTextNote, validateGroundedAnswer } from "../src/ai";
-import { claimTelegramUpdate, createNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, updateNote } from "../src/db";
+import { claimTelegramUpdate, createNote, failStalePendingNotes, getNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, updateNote } from "../src/db";
 import { extractFirstUrl, normalizeTags } from "../src/utils";
 
 describe("FastNotes helpers", () => {
@@ -75,6 +75,33 @@ describe("D1 notes", () => {
     });
     expect(attachment.telegram_file_id).toBe("telegram-file-id");
     expect("r2_key" in attachment).toBe(false);
+  });
+
+  it("publishes stale pending notes without touching another user's notes", async () => {
+    await env.DB.prepare("DELETE FROM notes WHERE owner_telegram_id IN (?, ?)").bind(40004, 50005).run();
+    const stale = await createNote(env.DB, {
+      ownerTelegramId: 40004,
+      type: "note",
+      title: "Зависшая запись",
+      text: "Исходный текст сохранён",
+      status: "draft",
+      processingStatus: "pending",
+    });
+    const other = await createNote(env.DB, {
+      ownerTelegramId: 50005,
+      type: "note",
+      title: "Чужая зависшая запись",
+      text: "Не изменять",
+      status: "draft",
+      processingStatus: "pending",
+    });
+    await env.DB.prepare("UPDATE notes SET created_at = datetime('now', '-3 minutes') WHERE id IN (?, ?)")
+      .bind(stale.id, other.id)
+      .run();
+
+    expect(await failStalePendingNotes(env.DB, 40004)).toBe(1);
+    expect(await getNote(env.DB, 40004, stale.id)).toMatchObject({ status: "published", processing_status: "failed" });
+    expect(await getNote(env.DB, 50005, other.id)).toMatchObject({ status: "draft", processing_status: "pending" });
   });
 
   it("rejects an AI answer that cites a note outside D1 search results", async () => {

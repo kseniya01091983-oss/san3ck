@@ -1,4 +1,4 @@
-import { exchangeSiteToken, hasSiteSession, isSameOriginMutation, logoutResponse } from "./auth";
+import { exchangeSiteToken, getSiteSessionTelegramId, isSameOriginMutation, logoutResponse } from "./auth";
 import { handleApi } from "./api";
 import { handleIntegrationCheck } from "./integration-check";
 import { handleTelegramWebhook } from "./telegram";
@@ -29,8 +29,8 @@ export default {
       return exchangeSiteToken(request, env);
     }
 
-    const authenticated = await hasSiteSession(request, env);
-    if (!authenticated) {
+    const siteTelegramId = await getSiteSessionTelegramId(request, env);
+    if (!siteTelegramId) {
       return url.pathname.startsWith("/api/")
         ? jsonResponse({ error: "Требуется вход через Telegram" }, 401)
         : loginRequired();
@@ -43,7 +43,7 @@ export default {
     }
     if (url.pathname.startsWith("/api/")) {
       if (request.method === "OPTIONS") return new Response(null, { status: 204 });
-      return handleApi(request, env);
+      return handleApi(request, env, siteTelegramId);
     }
     return env.ASSETS.fetch(request);
   },

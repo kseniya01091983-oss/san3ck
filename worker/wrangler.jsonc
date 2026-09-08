@@ -6,7 +6,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "PUBLIC_BASE_URL": "https://fastnotes-second-brain.kseniya01091983.workers.dev",
-    "OPENROUTER_MODEL": "z-ai/glm-5.3-flash"
+    "OPENROUTER_MODEL": "z-ai/glm-5.3-flash",
+    "TEACHER_TELEGRAM_ID": "126041348"
   },
   "d1_databases": [
     {

@@ -13,6 +13,7 @@ export default defineConfig({
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations(path.join(directory, "migrations")),
           OWNER_TELEGRAM_ID: "10001",
+          TEACHER_TELEGRAM_ID: "126041348",
           PUBLIC_BASE_URL: "https://fastnotes.test",
           TELEGRAM_BOT_TOKEN: "test-token",
           TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret",

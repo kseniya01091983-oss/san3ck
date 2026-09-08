@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { isAllowedTelegramId } from "./access";
 
 const COOKIE_NAME = "fastnotes_session";
 const LINK_TTL_SECONDS = 10 * 60;
@@ -38,41 +39,42 @@ async function verifySignedValue(secret: string, value: string, signature: strin
   }
 }
 
-function ownerId(env: Env): number {
-  return Number(env.OWNER_TELEGRAM_ID);
-}
-
-async function createToken(env: Env, ttlSeconds: number): Promise<string> {
-  const payload = `${ownerId(env)}.${Math.floor(Date.now() / 1000) + ttlSeconds}`;
+async function createToken(env: Env, telegramId: number, ttlSeconds: number): Promise<string> {
+  if (!isAllowedTelegramId(env, telegramId)) throw new Error("Telegram ID не имеет доступа");
+  const payload = `${telegramId}.${Math.floor(Date.now() / 1000) + ttlSeconds}`;
   return `${payload}.${await hmac(env.SITE_AUTH_SECRET, payload)}`;
 }
 
-async function verifyToken(token: string, env: Env): Promise<boolean> {
+async function verifyToken(token: string, env: Env): Promise<number | null> {
   const parts = token.split(".");
-  if (parts.length !== 3) return false;
-  const [rawOwner, rawExpires, signature] = parts;
-  if (Number(rawOwner) !== ownerId(env) || Number(rawExpires) < Math.floor(Date.now() / 1000)) {
-    return false;
+  if (parts.length !== 3) return null;
+  const [rawTelegramId, rawExpires, signature] = parts;
+  const telegramId = Number(rawTelegramId);
+  if (!Number.isSafeInteger(telegramId) || !isAllowedTelegramId(env, telegramId)) return null;
+  if (Number(rawExpires) < Math.floor(Date.now() / 1000)) {
+    return null;
   }
-  return verifySignedValue(env.SITE_AUTH_SECRET, `${rawOwner}.${rawExpires}`, signature);
+  const valid = await verifySignedValue(env.SITE_AUTH_SECRET, `${rawTelegramId}.${rawExpires}`, signature);
+  return valid ? telegramId : null;
 }
 
-export async function createSiteLoginUrl(env: Env): Promise<string> {
-  const token = await createToken(env, LINK_TTL_SECONDS);
+export async function createSiteLoginUrl(env: Env, telegramId: number): Promise<string> {
+  const token = await createToken(env, telegramId, LINK_TTL_SECONDS);
   return `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/auth/site?token=${encodeURIComponent(token)}`;
 }
 
 export async function exchangeSiteToken(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token") || "";
-  if (!(await verifyToken(token, env))) {
+  const telegramId = await verifyToken(token, env);
+  if (!telegramId) {
     return new Response("Ссылка устарела или недействительна. Запросите новую командой /site в Telegram.", {
       status: 401,
       headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
     });
   }
 
-  const session = await createToken(env, SESSION_TTL_SECONDS);
+  const session = await createToken(env, telegramId, SESSION_TTL_SECONDS);
   const secure = url.protocol === "https:" ? "; Secure" : "";
   return new Response(null, {
     status: 302,
@@ -93,9 +95,13 @@ function readCookie(request: Request, name: string): string | null {
   return null;
 }
 
-export async function hasSiteSession(request: Request, env: Env): Promise<boolean> {
+export async function getSiteSessionTelegramId(request: Request, env: Env): Promise<number | null> {
   const token = readCookie(request, COOKIE_NAME);
-  return token ? verifyToken(token, env) : false;
+  return token ? verifyToken(token, env) : null;
+}
+
+export async function hasSiteSession(request: Request, env: Env): Promise<boolean> {
+  return (await getSiteSessionTelegramId(request, env)) !== null;
 }
 
 export function logoutResponse(request: Request): Response {

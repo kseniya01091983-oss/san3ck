@@ -1,4 +1,5 @@
 import { analyzeTextMessage, describeImage, structureTextNote, summarizeExtractedLink } from "./ai";
+import { isAllowedTelegramId } from "./access";
 import { createSiteLoginUrl } from "./auth";
 import {
   claimTelegramUpdate,
@@ -51,10 +52,6 @@ import {
 const NOTES_PER_PAGE = 5;
 const MAX_VISION_BYTES = 8 * 1024 * 1024;
 
-function ownerId(env: Env): number {
-  return Number(env.OWNER_TELEGRAM_ID);
-}
-
 function noteKeyboard(note: NoteApi | NoteRow): InlineButton[][] {
   const failed = note.processing_status === "failed"
     ? [{ text: "🔄 Повторить", callback_data: `retry:${note.id}` }]
@@ -81,8 +78,8 @@ function formatNote(note: NoteApi | NoteRow): string {
   return `📁 <b>${escapeHtml(label)}</b> · <b>${escapeHtml(note.title || firstLine(text))}</b>\n\n${escapeHtml(text)}${source}${pending}${failed}`;
 }
 
-async function sendNote(env: Env, chatId: number, noteId: number): Promise<void> {
-  const note = await getNoteApi(env.DB, ownerId(env), noteId);
+async function sendNote(env: Env, chatId: number, noteId: number, telegramId: number): Promise<void> {
+  const note = await getNoteApi(env.DB, telegramId, noteId);
   if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
   await sendMessage(env, chatId, formatNote(note), noteKeyboard(note));
 }
@@ -100,15 +97,15 @@ function paginationKeyboard(notes: NoteApi[], page: number, totalPages: number):
   return rows;
 }
 
-async function sendNotesPage(env: Env, chatId: number, page: number): Promise<void> {
-  const result = await listNotes(env.DB, ownerId(env), {
+async function sendNotesPage(env: Env, chatId: number, page: number, telegramId: number): Promise<void> {
+  const result = await listNotes(env.DB, telegramId, {
     status: null,
     limit: NOTES_PER_PAGE,
     offset: Math.max(0, page) * NOTES_PER_PAGE,
   });
   const totalPages = Math.max(1, Math.ceil(result.total / NOTES_PER_PAGE));
   const safePage = Math.min(Math.max(0, page), totalPages - 1);
-  if (safePage !== page) return sendNotesPage(env, chatId, safePage);
+  if (safePage !== page) return sendNotesPage(env, chatId, safePage, telegramId);
   if (!result.items.length) return sendMessage(env, chatId, "📝 Заметок пока нет. Отправьте первую мысль или ссылку.");
   const lines = result.items.map(
     (note) => `• <b>№${note.id}</b> ${escapeHtml(note.title || firstLine(note.text))}`,
@@ -121,8 +118,8 @@ async function sendNotesPage(env: Env, chatId: number, page: number): Promise<vo
   );
 }
 
-async function answerFromNotes(env: Env, chatId: number, question: string): Promise<void> {
-  const candidates = await searchNotesForAnswer(env.DB, ownerId(env), question);
+async function answerFromNotes(env: Env, chatId: number, question: string, telegramId: number): Promise<void> {
+  const candidates = await searchNotesForAnswer(env.DB, telegramId, question);
   const result = await analyzeTextMessage(env, question, candidates, true);
   const buttons = result.intent === "answer_question"
     ? result.source_note_ids.map((id) => [{ text: `Открыть источник №${id}`, callback_data: `view:${id}` }])
@@ -130,9 +127,9 @@ async function answerFromNotes(env: Env, chatId: number, question: string): Prom
   await sendMessage(env, chatId, escapeHtml(result.intent === "answer_question" ? result.answer : "В заметках нет ответа."), buttons);
 }
 
-async function savePlainText(env: Env, chatId: number, text: string): Promise<void> {
+async function savePlainText(env: Env, chatId: number, text: string, telegramId: number): Promise<void> {
   const pending = await createNote(env.DB, {
-    ownerTelegramId: ownerId(env),
+    ownerTelegramId: telegramId,
     type: "note",
     title: firstLine(text),
     text,
@@ -142,38 +139,38 @@ async function savePlainText(env: Env, chatId: number, text: string): Promise<vo
     processingStatus: "pending",
     metadata: { created_from: "telegram", original_text_saved: true },
   });
-  const candidates = await searchNotesForAnswer(env.DB, ownerId(env), text);
+  const candidates = await searchNotesForAnswer(env.DB, telegramId, text);
   try {
     const analysis = await analyzeTextMessage(env, text, candidates, false);
     if (analysis.intent === "answer_question") {
-      await deleteNote(env.DB, ownerId(env), pending.id);
+      await deleteNote(env.DB, telegramId, pending.id);
       const buttons = analysis.source_note_ids.map((id) => [
         { text: `Открыть источник №${id}`, callback_data: `view:${id}` },
       ]);
       await sendMessage(env, chatId, escapeHtml(analysis.answer), buttons);
       return;
     }
-    await updateNote(env.DB, ownerId(env), pending.id, {
+    await updateNote(env.DB, telegramId, pending.id, {
       ...analysis.note,
       status: "published",
       processingStatus: "ready",
       metadata: { created_from: "telegram" },
     });
-    await sendNote(env, chatId, pending.id);
+    await sendNote(env, chatId, pending.id, telegramId);
   } catch (error) {
-    await updateNote(env.DB, ownerId(env), pending.id, {
+    await updateNote(env.DB, telegramId, pending.id, {
       status: "published",
       processingStatus: "failed",
       metadata: { created_from: "telegram", processing_error: error instanceof Error ? error.message : "unknown" },
     });
-    await sendNote(env, chatId, pending.id);
+    await sendNote(env, chatId, pending.id, telegramId);
   }
 }
 
-async function saveLink(env: Env, chatId: number, rawText: string, url: string): Promise<void> {
+async function saveLink(env: Env, chatId: number, rawText: string, url: string, telegramId: number): Promise<void> {
   const caption = rawText.replace(url, "").trim();
   const note = await createNote(env.DB, {
-    ownerTelegramId: ownerId(env),
+    ownerTelegramId: telegramId,
     type: "link",
     title: firstLine(caption || new URL(url).hostname, "Ссылка"),
     summary: caption,
@@ -186,19 +183,19 @@ async function saveLink(env: Env, chatId: number, rawText: string, url: string):
   try {
     const extracted = await extractPage(env, url);
     const summary = await summarizeExtractedLink(env, url, caption, extracted.content);
-    await updateNote(env.DB, ownerId(env), note.id, {
+    await updateNote(env.DB, telegramId, note.id, {
       type: "link",
       ...summary,
       processingStatus: "ready",
       metadata: { created_from: "telegram", ...extracted.metadata },
     });
   } catch (error) {
-    await updateNote(env.DB, ownerId(env), note.id, {
+    await updateNote(env.DB, telegramId, note.id, {
       processingStatus: "failed",
       metadata: { created_from: "telegram", processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  await sendNote(env, chatId, note.id);
+  await sendNote(env, chatId, note.id, telegramId);
 }
 
 type IncomingFile = {
@@ -279,10 +276,16 @@ function incomingDocument(document: TelegramDocument): IncomingFile {
   };
 }
 
-async function saveIncomingFile(env: Env, chatId: number, file: IncomingFile, caption: string): Promise<void> {
+async function saveIncomingFile(
+  env: Env,
+  chatId: number,
+  file: IncomingFile,
+  caption: string,
+  telegramId: number,
+): Promise<void> {
   const baseMetadata = { created_from: "telegram", telegram_file: incomingFileMetadata(file) };
   const note = await createNote(env.DB, {
-    ownerTelegramId: ownerId(env),
+    ownerTelegramId: telegramId,
     type: file.isImage ? "image" : "file",
     title: firstLine(caption || file.fileName),
     summary: caption,
@@ -294,7 +297,7 @@ async function saveIncomingFile(env: Env, chatId: number, file: IncomingFile, ca
   try {
     const attachment = await insertAttachment(env.DB, {
       note_id: note.id,
-      owner_telegram_id: ownerId(env),
+      owner_telegram_id: telegramId,
       telegram_file_id: file.fileId,
       telegram_file_unique_id: file.uniqueId,
       file_name: file.fileName,
@@ -315,14 +318,14 @@ async function saveIncomingFile(env: Env, chatId: number, file: IncomingFile, ca
       }
       const dataUrl = `data:${file.mimeType};base64,${bytesToBase64(bytes)}`;
       const description = await describeImage(env, dataUrl, caption);
-      await updateNote(env.DB, ownerId(env), note.id, {
+      await updateNote(env.DB, telegramId, note.id, {
         type: "image",
         ...description,
         processingStatus: "ready",
         metadata: { ...baseMetadata, attachment_id: attachment.id },
       });
     } else {
-      await updateNote(env.DB, ownerId(env), note.id, {
+      await updateNote(env.DB, telegramId, note.id, {
         type: "file",
         title: firstLine(caption || file.fileName),
         summary: caption || `Файл ${file.fileName}`,
@@ -332,53 +335,53 @@ async function saveIncomingFile(env: Env, chatId: number, file: IncomingFile, ca
       });
     }
   } catch (error) {
-    await updateNote(env.DB, ownerId(env), note.id, {
+    await updateNote(env.DB, telegramId, note.id, {
       processingStatus: "failed",
       metadata: { ...baseMetadata, processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  await sendNote(env, chatId, note.id);
+  await sendNote(env, chatId, note.id, telegramId);
 }
 
-async function editNoteText(env: Env, chatId: number, noteId: number, text: string): Promise<void> {
-  const updated = await updateNote(env.DB, ownerId(env), noteId, {
+async function editNoteText(env: Env, chatId: number, noteId: number, text: string, telegramId: number): Promise<void> {
+  const updated = await updateNote(env.DB, telegramId, noteId, {
     title: firstLine(text),
     summary: "",
     text,
     tags: tagsFromText(text),
     processingStatus: "ready",
   });
-  await clearConversationState(env.DB, ownerId(env));
+  await clearConversationState(env.DB, telegramId);
   if (!updated) return sendMessage(env, chatId, "❌ Заметка не найдена.");
   await sendMessage(env, chatId, "✨ <b>Заметка успешно обновлена на сайте!</b>");
-  await sendNote(env, chatId, noteId);
+  await sendNote(env, chatId, noteId, telegramId);
 }
 
-async function removeNote(env: Env, noteId: number): Promise<boolean> {
-  return deleteNote(env.DB, ownerId(env), noteId);
+async function removeNote(env: Env, noteId: number, telegramId: number): Promise<boolean> {
+  return deleteNote(env.DB, telegramId, noteId);
 }
 
-async function retryNote(env: Env, chatId: number, noteId: number): Promise<void> {
-  const note = await getNote(env.DB, ownerId(env), noteId);
+async function retryNote(env: Env, chatId: number, noteId: number, telegramId: number): Promise<void> {
+  const note = await getNote(env.DB, telegramId, noteId);
   if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-  await updateNote(env.DB, ownerId(env), noteId, { processingStatus: "pending" });
+  await updateNote(env.DB, telegramId, noteId, { processingStatus: "pending" });
   try {
     if (note.type === "link" && note.source_url) {
       const extracted = await extractPage(env, note.source_url);
       const summary = await summarizeExtractedLink(env, note.source_url, note.summary, extracted.content);
-      await updateNote(env.DB, ownerId(env), noteId, {
+      await updateNote(env.DB, telegramId, noteId, {
         ...summary,
         processingStatus: "ready",
         metadata: extracted.metadata,
       });
     } else if (note.type === "image" || note.type === "file") {
-      let attachment = (await listAttachmentsForNote(env.DB, ownerId(env), noteId))[0] || null;
+      let attachment = (await listAttachmentsForNote(env.DB, telegramId, noteId))[0] || null;
       const incoming = incomingFileFromMetadata(note);
       if (!attachment) {
         if (!incoming) throw new Error("Данные Telegram-файла отсутствуют для повтора");
         attachment = await insertAttachment(env.DB, {
           note_id: noteId,
-          owner_telegram_id: ownerId(env),
+          owner_telegram_id: telegramId,
           telegram_file_id: incoming.fileId,
           telegram_file_unique_id: incoming.uniqueId,
           file_name: incoming.fileName,
@@ -399,24 +402,30 @@ async function retryNote(env: Env, chatId: number, noteId: number): Promise<void
           `data:${attachment.mime_type};base64,${bytesToBase64(bytes)}`,
           note.summary,
         );
-        await updateNote(env.DB, ownerId(env), noteId, { ...description, processingStatus: "ready" });
+        await updateNote(env.DB, telegramId, noteId, { ...description, processingStatus: "ready" });
       } else {
-        await updateNote(env.DB, ownerId(env), noteId, { processingStatus: "ready" });
+        await updateNote(env.DB, telegramId, noteId, { processingStatus: "ready" });
       }
     } else {
       const structured = await structureTextNote(env, note.text);
-      await updateNote(env.DB, ownerId(env), noteId, { ...structured, processingStatus: "ready" });
+      await updateNote(env.DB, telegramId, noteId, { ...structured, processingStatus: "ready" });
     }
   } catch (error) {
-    await updateNote(env.DB, ownerId(env), noteId, {
+    await updateNote(env.DB, telegramId, noteId, {
       processingStatus: "failed",
       metadata: { processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  await sendNote(env, chatId, noteId);
+  await sendNote(env, chatId, noteId, telegramId);
 }
 
-async function handleCommand(env: Env, message: TelegramMessage, command: string, args: string): Promise<void> {
+async function handleCommand(
+  env: Env,
+  message: TelegramMessage,
+  command: string,
+  args: string,
+  telegramId: number,
+): Promise<void> {
   const chatId = message.chat.id;
   if (["start", "help"].includes(command)) {
     return sendMessage(
@@ -425,35 +434,35 @@ async function handleCommand(env: Env, message: TelegramMessage, command: string
       "<b>FastNotes</b>\n\nОтправьте мысль, ссылку, изображение или файл — сохраню и структурирую.\n\nКоманды: /notes, /ask, /site, /edit, /hide, /show, /delete",
     );
   }
-  if (["notes", "list"].includes(command)) return sendNotesPage(env, chatId, 0);
+  if (["notes", "list"].includes(command)) return sendNotesPage(env, chatId, 0, telegramId);
   if (["site", "web"].includes(command)) {
-    const url = await createSiteLoginUrl(env);
+    const url = await createSiteLoginUrl(env, telegramId);
     return sendMessage(env, chatId, "<b>FastNotes</b>\n\nСсылка действует 10 минут:", [[{ text: "🌐 Открыть сайт", url }]]);
   }
   if (["ask", "q"].includes(command)) {
     if (!args) return sendMessage(env, chatId, "💬 Задайте вопрос после команды. Например: <code>/ask какая цель проекта?</code>");
-    return answerFromNotes(env, chatId, args);
+    return answerFromNotes(env, chatId, args, telegramId);
   }
   if (command === "edit") {
     const match = args.match(/^(\d+)(?:\s+([\s\S]+))?$/);
     if (!match) return sendMessage(env, chatId, "⚠️ Используйте: <code>/edit &lt;id&gt;</code>");
     const noteId = Number(match[1]);
-    if (!(await getNote(env.DB, ownerId(env), noteId))) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-    if (match[2]) return editNoteText(env, chatId, noteId, match[2].trim());
-    await setConversationState(env.DB, ownerId(env), "edit", noteId);
+    if (!(await getNote(env.DB, telegramId, noteId))) return sendMessage(env, chatId, "❌ Заметка не найдена.");
+    if (match[2]) return editNoteText(env, chatId, noteId, match[2].trim(), telegramId);
+    await setConversationState(env.DB, telegramId, "edit", noteId);
     return sendMessage(env, chatId, `✏️ Отправьте новым сообщением текст для заметки <b>№${noteId}</b>.`, [[{ text: "❌ Отменить", callback_data: "cancel_action" }]]);
   }
   if (["hide", "show"].includes(command)) {
     const noteId = Number(args);
     if (!Number.isInteger(noteId)) return sendMessage(env, chatId, `⚠️ Используйте: <code>/${command} &lt;id&gt;</code>`);
-    const note = await updateNote(env.DB, ownerId(env), noteId, { status: command === "hide" ? "hidden" : "published" });
+    const note = await updateNote(env.DB, telegramId, noteId, { status: command === "hide" ? "hidden" : "published" });
     if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-    return sendNote(env, chatId, noteId);
+    return sendNote(env, chatId, noteId, telegramId);
   }
   if (command === "delete") {
     const noteId = Number(args);
     if (!Number.isInteger(noteId)) return sendMessage(env, chatId, "⚠️ Используйте: <code>/delete &lt;id&gt;</code>");
-    const note = await getNote(env.DB, ownerId(env), noteId);
+    const note = await getNote(env.DB, telegramId, noteId);
     if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
     return sendMessage(env, chatId, `❓ Удалить заметку <b>№${noteId}</b>?`, [[
       { text: "✅ Да, удалить", callback_data: `confirm_delete:${noteId}` },
@@ -463,43 +472,43 @@ async function handleCommand(env: Env, message: TelegramMessage, command: string
   await sendMessage(env, chatId, "Неизвестная команда. Используйте /help.");
 }
 
-async function handleMessage(env: Env, message: TelegramMessage): Promise<void> {
+async function handleMessage(env: Env, message: TelegramMessage, telegramId: number): Promise<void> {
   const chatId = message.chat.id;
   const text = (message.text || "").trim();
   if (text) {
     const command = commandParts(text);
-    if (command) return handleCommand(env, message, command.command, command.args);
+    if (command) return handleCommand(env, message, command.command, command.args, telegramId);
   }
 
-  const state = await getConversationState(env.DB, ownerId(env));
-  if (state?.action === "edit" && state.note_id && text) return editNoteText(env, chatId, state.note_id, text);
+  const state = await getConversationState(env.DB, telegramId);
+  if (state?.action === "edit" && state.note_id && text) return editNoteText(env, chatId, state.note_id, text, telegramId);
 
   await sendTyping(env, chatId).catch(() => undefined);
   const caption = (message.caption || "").trim();
-  if (message.photo?.length) return saveIncomingFile(env, chatId, incomingPhoto(message.photo.at(-1)!), caption);
-  if (message.document) return saveIncomingFile(env, chatId, incomingDocument(message.document), caption);
+  if (message.photo?.length) return saveIncomingFile(env, chatId, incomingPhoto(message.photo.at(-1)!), caption, telegramId);
+  if (message.document) return saveIncomingFile(env, chatId, incomingDocument(message.document), caption, telegramId);
   if (!text) return sendMessage(env, chatId, "Пока я умею сохранять текст, ссылки, изображения и файлы.");
   const url = extractFirstUrl(text);
-  return url ? saveLink(env, chatId, text, url) : savePlainText(env, chatId, text);
+  return url ? saveLink(env, chatId, text, url, telegramId) : savePlainText(env, chatId, text, telegramId);
 }
 
-async function handleCallback(env: Env, callback: TelegramCallbackQuery): Promise<void> {
+async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegramId: number): Promise<void> {
   const data = callback.data || "";
   const chatId = callback.message?.chat.id;
   await answerCallback(env, callback.id).catch(() => undefined);
   if (!chatId) return;
   if (data === "noop") return;
   if (data === "cancel_action") {
-    await clearConversationState(env.DB, ownerId(env));
+    await clearConversationState(env.DB, telegramId);
     return sendMessage(env, chatId, "🚫 Действие отменено.");
   }
   const [action, rawId] = data.split(":", 2);
   const id = Number(rawId);
-  if (action === "page" && Number.isInteger(id)) return sendNotesPage(env, chatId, id);
-  if (action === "view" && Number.isInteger(id)) return sendNote(env, chatId, id);
+  if (action === "page" && Number.isInteger(id)) return sendNotesPage(env, chatId, id, telegramId);
+  if (action === "view" && Number.isInteger(id)) return sendNote(env, chatId, id, telegramId);
   if (action === "edit" && Number.isInteger(id)) {
-    if (!(await getNote(env.DB, ownerId(env), id))) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-    await setConversationState(env.DB, ownerId(env), "edit", id);
+    if (!(await getNote(env.DB, telegramId, id))) return sendMessage(env, chatId, "❌ Заметка не найдена.");
+    await setConversationState(env.DB, telegramId, "edit", id);
     return sendMessage(env, chatId, `✏️ Отправьте новым сообщением текст для заметки <b>№${id}</b>.`, [[{ text: "❌ Отменить", callback_data: "cancel_action" }]]);
   }
   if (action === "delete" && Number.isInteger(id)) {
@@ -509,29 +518,29 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery): Promis
     ]]);
   }
   if (action === "confirm_delete" && Number.isInteger(id)) {
-    const deleted = await removeNote(env, id);
+    const deleted = await removeNote(env, id, telegramId);
     return sendMessage(env, chatId, deleted ? `🗑 <b>Заметка №${id} удалена.</b>` : "❌ Заметка уже удалена.");
   }
   if (action === "toggle_status" && Number.isInteger(id)) {
-    const note = await getNote(env.DB, ownerId(env), id);
+    const note = await getNote(env.DB, telegramId, id);
     if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-    await updateNote(env.DB, ownerId(env), id, { status: note.status === "published" ? "hidden" : "published" });
-    return sendNote(env, chatId, id);
+    await updateNote(env.DB, telegramId, id, { status: note.status === "published" ? "hidden" : "published" });
+    return sendNote(env, chatId, id, telegramId);
   }
-  if (action === "retry" && Number.isInteger(id)) return retryNote(env, chatId, id);
+  if (action === "retry" && Number.isInteger(id)) return retryNote(env, chatId, id, telegramId);
 }
 
 async function processUpdate(update: TelegramUpdate, env: Env): Promise<void> {
   const actor = update.message?.from || update.callback_query?.from;
   const chatId = update.message?.chat.id || update.callback_query?.message?.chat.id;
-  if (!actor || actor.id !== ownerId(env)) {
+  if (!actor || !isAllowedTelegramId(env, actor.id)) {
     if (chatId) await sendMessage(env, chatId, "⛔ Доступ закрыт.").catch(() => undefined);
     return;
   }
   if (!(await claimTelegramUpdate(env.DB, update.update_id))) return;
   try {
-    if (update.callback_query) await handleCallback(env, update.callback_query);
-    else if (update.message) await handleMessage(env, update.message);
+    if (update.callback_query) await handleCallback(env, update.callback_query, actor.id);
+    else if (update.message) await handleMessage(env, update.message, actor.id);
   } catch (error) {
     console.error("Telegram update failed", update.update_id, error);
     if (chatId) await sendMessage(env, chatId, "⚠️ Не удалось завершить операцию. Исходные данные по возможности сохранены.").catch(() => undefined);

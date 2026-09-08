@@ -1,8 +1,9 @@
 import { env } from "cloudflare:workers";
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
-import { createSiteLoginUrl, exchangeSiteToken, hasSiteSession } from "../src/auth";
+import { isAllowedTelegramId } from "../src/access";
+import { createSiteLoginUrl, exchangeSiteToken, getSiteSessionTelegramId, hasSiteSession } from "../src/auth";
 import { structureTextNote, validateGroundedAnswer } from "../src/ai";
 import { claimTelegramUpdate, createNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, updateNote } from "../src/db";
 import { extractFirstUrl, normalizeTags } from "../src/utils";
@@ -136,7 +137,7 @@ describe("OpenRouter routing", () => {
 
 describe("site login", () => {
   it("exchanges a temporary link for a valid HttpOnly session", async () => {
-    const url = await createSiteLoginUrl(env);
+    const url = await createSiteLoginUrl(env, 10001);
     const exchange = await exchangeSiteToken(new Request(url), env);
     expect(exchange.status).toBe(302);
     const cookie = exchange.headers.get("Set-Cookie");
@@ -145,19 +146,28 @@ describe("site login", () => {
     const sessionCookie = cookie!.split(";", 1)[0];
     expect(await hasSiteSession(new Request("https://fastnotes.test", { headers: { Cookie: sessionCookie } }), env))
       .toBe(true);
+    expect(await getSiteSessionTelegramId(new Request("https://fastnotes.test", { headers: { Cookie: sessionCookie } }), env))
+      .toBe(10001);
   });
 
   it("rejects a changed token", async () => {
-    const url = new URL(await createSiteLoginUrl(env));
+    const url = new URL(await createSiteLoginUrl(env, 10001));
     const token = url.searchParams.get("token")!;
     url.searchParams.set("token", `${token.slice(0, -1)}x`);
     expect((await exchangeSiteToken(new Request(url), env)).status).toBe(401);
+  });
+
+  it("allows the teacher but rejects an unrelated Telegram ID", async () => {
+    expect(isAllowedTelegramId(env, 10001)).toBe(true);
+    expect(isAllowedTelegramId(env, 126041348)).toBe(true);
+    expect(isAllowedTelegramId(env, 999999999)).toBe(false);
+    await expect(createSiteLoginUrl(env, 999999999)).rejects.toThrow("не имеет доступа");
   });
 });
 
 describe("Worker API", () => {
   it("supports authenticated CRUD routes", async () => {
-    const exchange = await exchangeSiteToken(new Request(await createSiteLoginUrl(env)), env);
+    const exchange = await exchangeSiteToken(new Request(await createSiteLoginUrl(env, 10001)), env);
     const setCookie = exchange.headers.get("Set-Cookie");
     expect(setCookie).not.toBeNull();
     const cookie = String(setCookie).split(";", 1)[0];
@@ -197,5 +207,75 @@ describe("Worker API", () => {
       createExecutionContext(),
     );
     expect(response.status).toBe(401);
+  });
+
+  it("keeps the teacher's notes separate from the owner's notes", async () => {
+    const cookieFor = async (telegramId: number): Promise<string> => {
+      const exchange = await exchangeSiteToken(new Request(await createSiteLoginUrl(env, telegramId)), env);
+      return String(exchange.headers.get("Set-Cookie")).split(";", 1)[0];
+    };
+    const ownerCookie = await cookieFor(10001);
+    const teacherCookie = await cookieFor(126041348);
+    const callAs = (cookie: string, path: string, init: RequestInit = {}) => worker.fetch(
+      new Request(`https://fastnotes.test${path}`, {
+        ...init,
+        headers: { Cookie: cookie, Origin: "https://fastnotes.test", "Content-Type": "application/json", ...init.headers },
+      }),
+      env,
+      createExecutionContext(),
+    );
+
+    const createdResponse = await callAs(teacherCookie, "/api/notes", {
+      method: "POST",
+      body: JSON.stringify({ text: "Тестовая заметка преподавателя", raw: true }),
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = await createdResponse.json<{ id: number }>();
+
+    expect((await callAs(teacherCookie, `/api/notes/${created.id}`)).status).toBe(200);
+    expect((await callAs(ownerCookie, `/api/notes/${created.id}`)).status).toBe(404);
+    const ownerList = await (await callAs(ownerCookie, "/api/notes?status=all")).json<{ items: Array<{ id: number }> }>();
+    expect(ownerList.items.some((note) => note.id === created.id)).toBe(false);
+  });
+});
+
+describe("Telegram access", () => {
+  it("accepts the teacher ID and still rejects an unrelated ID", async () => {
+    const sentMessages: Array<Record<string, unknown>> = [];
+    const mockFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sentMessages.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ ok: true, result: {} });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+    const sendUpdate = async (update: Record<string, unknown>) => {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(new Request("https://fastnotes.test/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret",
+        },
+        body: JSON.stringify(update),
+      }), env, ctx);
+      await waitOnExecutionContext(ctx);
+      return response;
+    };
+
+    try {
+      expect((await sendUpdate({
+        update_id: 81001,
+        message: { message_id: 1, chat: { id: 126041348 }, from: { id: 126041348 }, text: "/start" },
+      })).status).toBe(200);
+      expect(String(sentMessages.at(-1)?.text)).toContain("FastNotes");
+      expect(String(sentMessages.at(-1)?.text)).not.toContain("Доступ закрыт");
+
+      expect((await sendUpdate({
+        update_id: 81002,
+        message: { message_id: 2, chat: { id: 999999999 }, from: { id: 999999999 }, text: "/start" },
+      })).status).toBe(200);
+      expect(String(sentMessages.at(-1)?.text)).toContain("Доступ закрыт");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -15,6 +15,7 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   OWNER_TELEGRAM_ID: string;
+  TEACHER_TELEGRAM_ID?: string;
   PUBLIC_BASE_URL: string;
   OPENROUTER_MODEL: string;
   TELEGRAM_BOT_TOKEN: string;

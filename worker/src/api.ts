@@ -21,12 +21,6 @@ import {
   truncate,
 } from "./utils";
 
-function ownerId(env: Env): number {
-  const value = Number(env.OWNER_TELEGRAM_ID);
-  if (!Number.isSafeInteger(value) || value <= 0) throw new Error("OWNER_TELEGRAM_ID не настроен");
-  return value;
-}
-
 async function requestJson(request: Request): Promise<Record<string, unknown>> {
   const contentLength = Number(request.headers.get("Content-Length") || 0);
   if (contentLength > 256_000) throw new Error("Слишком большой JSON-запрос");
@@ -45,7 +39,7 @@ function attachmentIdFromPath(pathname: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-async function handleList(request: Request, env: Env): Promise<Response> {
+async function handleList(request: Request, env: Env, telegramId: number): Promise<Response> {
   const url = new URL(request.url);
   const rawStatus = url.searchParams.get("status");
   const status = rawStatus === "all" ? null : normalizeStatus(rawStatus || "published");
@@ -53,7 +47,7 @@ async function handleList(request: Request, env: Env): Promise<Response> {
   const typeValue = url.searchParams.get("type");
   const limit = Number(url.searchParams.get("limit") || 50);
   const offset = Number(url.searchParams.get("offset") || 0);
-  const result = await listNotes(env.DB, ownerId(env), {
+  const result = await listNotes(env.DB, telegramId, {
     limit: Number.isFinite(limit) ? limit : 50,
     offset: Number.isFinite(offset) ? offset : 0,
     status,
@@ -65,7 +59,7 @@ async function handleList(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ ...result, limit: Math.min(200, Math.max(1, limit || 50)), offset: Math.max(0, offset || 0) });
 }
 
-async function handleCreate(request: Request, env: Env): Promise<Response> {
+async function handleCreate(request: Request, env: Env, telegramId: number): Promise<Response> {
   const body = await requestJson(request);
   const rawText = String(body.text || "").trim();
   if (!rawText) return jsonResponse({ error: "Текст не может быть пустым" }, 400);
@@ -74,7 +68,7 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
   try {
     const structured = body.raw ? null : await structureTextNote(env, rawText);
     row = await createNote(env.DB, {
-      ownerTelegramId: ownerId(env),
+      ownerTelegramId: telegramId,
       type: structured?.type || normalizeType(body.type, "note"),
       title: truncate(String(body.title || structured?.title || firstLine(rawText)), 160),
       summary: truncate(String(body.summary || structured?.summary || ""), 800),
@@ -87,7 +81,7 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
     });
   } catch (error) {
     row = await createNote(env.DB, {
-      ownerTelegramId: ownerId(env),
+      ownerTelegramId: telegramId,
       type: normalizeType(body.type, "note"),
       title: truncate(String(body.title || firstLine(rawText)), 160),
       summary: "",
@@ -99,17 +93,17 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
       metadata: { created_from: "web", processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  return jsonResponse(await getNoteApi(env.DB, ownerId(env), row.id), 201);
+  return jsonResponse(await getNoteApi(env.DB, telegramId, row.id), 201);
 }
 
-async function handleGet(id: number, env: Env): Promise<Response> {
-  const note = await getNoteApi(env.DB, ownerId(env), id);
+async function handleGet(id: number, env: Env, telegramId: number): Promise<Response> {
+  const note = await getNoteApi(env.DB, telegramId, id);
   return note ? jsonResponse(note) : jsonResponse({ error: "Заметка не найдена" }, 404);
 }
 
-async function handleUpdate(request: Request, id: number, env: Env): Promise<Response> {
+async function handleUpdate(request: Request, id: number, env: Env, telegramId: number): Promise<Response> {
   const body = await requestJson(request);
-  const current = await getNote(env.DB, ownerId(env), id);
+  const current = await getNote(env.DB, telegramId, id);
   if (!current) return jsonResponse({ error: "Заметка не найдена" }, 404);
 
   const input: {
@@ -134,12 +128,12 @@ async function handleUpdate(request: Request, id: number, env: Env): Promise<Res
   if (body.section !== undefined) input.section = normalizeSection(body.section);
   if (body.status !== undefined) input.status = normalizeStatus(body.status);
 
-  await updateNote(env.DB, ownerId(env), id, input);
-  return jsonResponse(await getNoteApi(env.DB, ownerId(env), id));
+  await updateNote(env.DB, telegramId, id, input);
+  return jsonResponse(await getNoteApi(env.DB, telegramId, id));
 }
 
-async function handleFile(id: number, env: Env): Promise<Response> {
-  const attachment = await getAttachment(env.DB, ownerId(env), id);
+async function handleFile(id: number, env: Env, telegramId: number): Promise<Response> {
+  const attachment = await getAttachment(env.DB, telegramId, id);
   if (!attachment) return jsonResponse({ error: "Файл не найден" }, 404);
   if (!attachment.telegram_file_id) return jsonResponse({ error: "У файла нет Telegram file_id" }, 404);
   const info = await getTelegramFile(env, attachment.telegram_file_id);
@@ -152,25 +146,25 @@ async function handleFile(id: number, env: Env): Promise<Response> {
   return new Response(telegramFile.body, { headers });
 }
 
-export async function handleApi(request: Request, env: Env): Promise<Response> {
+export async function handleApi(request: Request, env: Env, telegramId: number): Promise<Response> {
   const url = new URL(request.url);
   try {
-    if (url.pathname === "/api/notes" && request.method === "GET") return handleList(request, env);
-    if (url.pathname === "/api/notes" && request.method === "POST") return handleCreate(request, env);
+    if (url.pathname === "/api/notes" && request.method === "GET") return handleList(request, env, telegramId);
+    if (url.pathname === "/api/notes" && request.method === "POST") return handleCreate(request, env, telegramId);
     if (url.pathname === "/api/stats" && request.method === "GET") {
-      return jsonResponse(await getStats(env.DB, ownerId(env)));
+      return jsonResponse(await getStats(env.DB, telegramId));
     }
 
     const noteId = noteIdFromPath(url.pathname);
-    if (noteId !== null && request.method === "GET") return handleGet(noteId, env);
-    if (noteId !== null && ["PUT", "PATCH"].includes(request.method)) return handleUpdate(request, noteId, env);
+    if (noteId !== null && request.method === "GET") return handleGet(noteId, env, telegramId);
+    if (noteId !== null && ["PUT", "PATCH"].includes(request.method)) return handleUpdate(request, noteId, env, telegramId);
     if (noteId !== null && request.method === "DELETE") {
-      const removed = await deleteNote(env.DB, ownerId(env), noteId);
+      const removed = await deleteNote(env.DB, telegramId, noteId);
       return removed ? new Response(null, { status: 204 }) : jsonResponse({ error: "Заметка не найдена" }, 404);
     }
 
     const fileId = attachmentIdFromPath(url.pathname);
-    if (fileId !== null && request.method === "GET") return handleFile(fileId, env);
+    if (fileId !== null && request.method === "GET") return handleFile(fileId, env, telegramId);
     return jsonResponse({ error: "Маршрут не найден" }, 404);
   } catch (error) {
     console.error("API error", error);

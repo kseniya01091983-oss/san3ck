@@ -1,0 +1,142 @@
+# FastNotes на Cloudflare
+
+Это облачная версия Сашиного FastNotes. Оригинальный Python-бот и локальная `notes.db` остаются без изменений. Новый Worker принимает Telegram webhook, хранит заметки и метаданные вложений в D1 и отдаёт прежний сайт из папки `site/`. R2 не нужен.
+
+## Что уже умеет Worker
+
+- принимает текст, ссылки, изображения и обычные файлы из Telegram;
+- сохраняет исходник до обращения к внешним AI-сервисам;
+- структурирует текст и отвечает по заметкам через OpenRouter;
+- извлекает страницу по ссылке через Tavily, но не сохраняет полный текст страницы;
+- хранит описание, Telegram `file_id` и метаданные вложений в D1; сами файлы остаются в Telegram;
+- поддерживает список, поиск, просмотр, изменение, скрытие, публикацию и удаление;
+- не создаёт дубль при повторной доставке одного Telegram update;
+- разрешает доступ только владельцу из `OWNER_TELEGRAM_ID`;
+- открывает сайт по временной ссылке `/site` и защищает API cookie-сессией.
+
+## Что находится в папке
+
+- `src/` — код Worker, Telegram, API, OpenRouter и Tavily;
+- `migrations/` — таблицы D1, отказ от R2, индексы и FTS5-поиск;
+- `scripts/export_sqlite_to_d1.py` — экспорт старой SQLite-базы только для чтения;
+- `test/` — модульные и интеграционные тесты;
+- `wrangler.jsonc` — bindings D1 и Static Assets;
+- `.dev.vars.example` — пример локальных секретов без настоящих значений.
+
+## Локальная проверка
+
+Нужны Node.js и Python 3. В PowerShell:
+
+```powershell
+cd worker
+npm install
+npm run typecheck
+npm test
+npm run db:migrate:local
+Copy-Item .dev.vars.example .dev.vars
+npm run dev
+```
+
+Перед `npm run dev` замените примеры в `.dev.vars` своими тестовыми значениями. Этот файл исключён из Git.
+
+## Подготовка Cloudflare
+
+Эти команды выполняются один раз после входа в Cloudflare:
+
+```powershell
+cd worker
+npx wrangler login
+npx wrangler d1 create fastnotes-db
+```
+
+Команда создания D1 покажет `database_id`. Вставьте его вместо нулевого ID в `wrangler.jsonc`. В этом же файле задайте:
+
+- `PUBLIC_BASE_URL` — адрес Worker после первого развёртывания.
+
+Одна модель текста и изображений уже указана в конфигурации: `z-ai/glm-5.3-flash`. Она вызывается только через DeepInfra, Novita, Z.AI и GMICloud. Затем Worker пробует DeepSeek для текста и бесплатный маршрут OpenRouter.
+
+Секреты вводятся интерактивно. Их нельзя записывать в `wrangler.jsonc`:
+
+```powershell
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+npx wrangler secret put OPENROUTER_API_KEY
+npx wrangler secret put TAVILY_API_KEY
+npx wrangler secret put SITE_AUTH_SECRET
+npx wrangler secret put OWNER_TELEGRAM_ID
+```
+
+Для `TELEGRAM_WEBHOOK_SECRET` и `SITE_AUTH_SECRET` используйте две разные длинные случайные строки.
+
+Если терминал неудобен, можно запустить локальную страницу:
+
+```powershell
+pnpm run setup:secrets
+```
+
+Откройте `http://127.0.0.1:8790`, вставьте токен Telegram и ключи OpenRouter/Tavily и нажмите одну кнопку. Помощник передаёт значения напрямую в Cloudflare Worker Secrets, сам создаёт секрет webhook и регистрирует webhook в Telegram. Значения не записываются в файл и не выводятся на экран.
+
+## Перенос `notes.db`
+
+Сначала примените схему в облачной D1:
+
+```powershell
+npm run db:migrate:remote
+```
+
+Затем создайте временный экспорт. Подставьте только свой числовой Telegram ID:
+
+```powershell
+python scripts/export_sqlite_to_d1.py --owner-id 123456789
+npx wrangler d1 execute DB --remote --file=.data/legacy-notes.sql
+```
+
+Скрипт открывает `../notes.db` в режиме только для чтения. SQL-файл содержит личные данные, лежит в исключённой из Git папке `.data` и не должен никому отправляться.
+
+Проверка количества без вывода текста заметок:
+
+```powershell
+npx wrangler d1 execute DB --remote --command "SELECT COUNT(*) AS notes_count FROM notes; SELECT COUNT(*) AS search_count FROM notes_fts;"
+```
+
+## Развёртывание и Telegram webhook
+
+Первое развёртывание:
+
+```powershell
+npx wrangler deploy
+```
+
+Wrangler покажет адрес вида `https://fastnotes-second-brain.<поддомен>.workers.dev`. Запишите его в `PUBLIC_BASE_URL` внутри `wrangler.jsonc` и выполните `npx wrangler deploy` ещё раз.
+
+После этого зарегистрируйте webhook методом Telegram `setWebhook`:
+
+- URL: `<PUBLIC_BASE_URL>/telegram/webhook`;
+- `secret_token`: та же строка, которую вы ввели как `TELEGRAM_WEBHOOK_SECRET`.
+
+Токен бота и секрет webhook не вставляйте в сообщения, документацию или Git. Удобнее выполнить запрос локально из PowerShell, сохранив значения только во временных переменных текущего окна.
+
+Проверка после подключения:
+
+1. Откройте `<PUBLIC_BASE_URL>/health` — должен появиться ответ с `"ok": true`.
+2. Напишите боту `/start`, затем отправьте обычный текст.
+3. Выполните `/notes` и откройте сохранённую запись.
+4. Выполните `/site` и перейдите по временной кнопке.
+5. Проверьте ссылку, изображение, файл, `/ask`, изменение, скрытие и удаление.
+
+## Резервная копия
+
+Исходная `notes.db` уже является локальной резервной копией старой версии. Облачную D1 можно выгрузить так:
+
+```powershell
+npx wrangler d1 export DB --remote --output=.data/fastnotes-backup.sql
+```
+
+Файл резервной копии содержит личные данные и исключён из Git. В D1 сохраняются только описания и Telegram `file_id`: отдельной резервной копии байтов вложений в этой версии нет.
+
+## Важные ограничения первой версии
+
+- сервис рассчитан на одного владельца;
+- для обычных документов сохраняются описание и Telegram `file_id`, но содержимое не анализируется;
+- если Telegram перестанет выдавать файл по сохранённому `file_id`, заметка и её описание останутся, но скачать файл с сайта не получится;
+- реальные сквозные тесты требуют созданной D1, ключей OpenRouter и Tavily и действующего Telegram-бота.

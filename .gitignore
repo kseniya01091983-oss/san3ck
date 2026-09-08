@@ -1,0 +1,20 @@
+# Python
+.env
+.venv/
+__pycache__/
+*.py[cod]
+notes.db
+
+# Cloudflare Worker
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+worker/.data/
+worker/coverage/
+worker/dist/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

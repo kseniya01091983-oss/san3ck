@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fastnotes-second-brain",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "PUBLIC_BASE_URL": "https://fastnotes-second-brain.kseniya01091983.workers.dev",
+    "OPENROUTER_MODEL": "z-ai/glm-5.3-flash"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fastnotes-db",
+      "database_id": "4da145e1-975b-4aa0-9fdd-ceb562851a5a",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "assets": {
+    "directory": "../site",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "observability": {
+    "enabled": true
+  }
+}

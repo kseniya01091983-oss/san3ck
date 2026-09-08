@@ -1,0 +1,8 @@
+# Скопируйте этот файл в .dev.vars и заполните значения только на своём компьютере.
+# Файл .dev.vars не попадает в Git.
+TELEGRAM_BOT_TOKEN=вставьте_токен_локально
+TELEGRAM_WEBHOOK_SECRET=случайная_строка
+OPENROUTER_API_KEY=вставьте_ключ_локально
+TAVILY_API_KEY=вставьте_ключ_локально
+SITE_AUTH_SECRET=длинная_случайная_строка
+OWNER_TELEGRAM_ID=ваш_числовой_telegram_id

@@ -1464,6 +1464,13 @@
       .status-capsule span.status-text {
         display: none;
       }
+      .refresh-notes-btn {
+        width: 36px;
+        padding: 8px;
+      }
+      .refresh-notes-btn span {
+        display: none;
+      }
       .main-content {
         padding: 20px 16px 48px;
       }
@@ -1535,6 +1542,10 @@
           <span class="status-dot offline" id="statusDot"></span>
           <span class="status-text" id="statusText">Подключение…</span>
         </div>
+        <button class="btn btn-secondary refresh-notes-btn" id="refreshNotesBtn" aria-label="Обновить заметки" title="Загрузить свежие заметки">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          <span>Обновить</span>
+        </button>
         <button class="btn btn-secondary btn-icon" id="themeBtn" aria-label="Сменить тему" title="Сменить тему">
           <span id="themeIcon" aria-hidden="true">◐</span>
         </button>
@@ -1667,8 +1678,9 @@
       let activeSection = "all";
       let searchQuery = "";
       let activeView = "grid";
-      let eventSource = null;
       let isServerConnected = false;
+      let lastNotesSignature = "";
+      let notesRequestInFlight = false;
 
       const SECTIONS = [
         {
@@ -1776,6 +1788,7 @@
       const statusText = document.getElementById("statusText");
       const themeBtn = document.getElementById("themeBtn");
       const themeIcon = document.getElementById("themeIcon");
+      const refreshNotesBtn = document.getElementById("refreshNotesBtn");
 
       // Modals
       const detailModal = document.getElementById("detailModal");
@@ -2294,6 +2307,7 @@
             const updated = await res.json();
             const idx = allNotes.findIndex((item) => item.id === updated.id);
             if (idx !== -1) allNotes[idx] = updated;
+            rememberCurrentNotes();
             closeDetailModal();
             renderTagsBar();
             applyFilters();
@@ -2376,6 +2390,7 @@
             // Prepend note locally if not immediately received via SSE
             if (!allNotes.some((n) => n.id === created.id)) {
               allNotes.unshift(created);
+              rememberCurrentNotes();
               if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
               renderTagsBar();
               applyFilters();
@@ -2394,6 +2409,7 @@
       if (closeCreateBtn) closeCreateBtn.addEventListener("click", closeCreateModal);
       if (cancelCreateBtn) cancelCreateBtn.addEventListener("click", closeCreateModal);
       if (openCreateBtn) openCreateBtn.addEventListener("click", openCreateModal);
+      if (refreshNotesBtn) refreshNotesBtn.addEventListener("click", () => fetchNotes(true));
 
       if (detailModal) {
         detailModal.addEventListener("click", (e) => {
@@ -2434,30 +2450,49 @@
         return [];
       }
 
-      // Fetch notes from server or local static json fallback
-      async function fetchNotes() {
-        // Try live API endpoint first
+      function notesSignature(notes) {
+        return JSON.stringify(notes);
+      }
+
+      function rememberCurrentNotes() {
+        lastNotesSignature = notesSignature(allNotes);
+      }
+
+      // Загружает заметки только при открытии страницы или по кнопке пользователя.
+      async function fetchNotes(manual = false) {
+        if (notesRequestInFlight) return;
+        notesRequestInFlight = true;
+        if (refreshNotesBtn) refreshNotesBtn.disabled = true;
         try {
           const res = await fetch("/api/notes?limit=200&status=all");
           if (res.ok) {
             const data = await res.json();
             const items = data.items || data;
             if (Array.isArray(items)) {
-              allNotes = items;
+              const nextSignature = notesSignature(items);
+              const changed = nextSignature !== lastNotesSignature;
+              if (changed) {
+                allNotes = items;
+                lastNotesSignature = nextSignature;
+                if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
+                renderTagsBar();
+                applyFilters();
+              }
               isServerConnected = true;
               updateServerStatus(true);
-              if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
               if (statLastSync) statLastSync.textContent = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-              renderTagsBar();
-              applyFilters();
+              if (manual) showToast(changed ? "Заметки обновлены" : "Новых изменений нет");
               return;
             }
           }
+          throw new Error("notes_fetch_failed");
         } catch (e) {
-          // Live API unreachable
+          updateServerStatus(false);
+          if (manual) showToast("Не удалось обновить заметки");
+        } finally {
+          notesRequestInFlight = false;
+          if (refreshNotesBtn) refreshNotesBtn.disabled = false;
         }
-
-        updateServerStatus(false);
       }
 
       // Update UI indicator for server connection
@@ -2472,65 +2507,12 @@
         }
       }
 
-      // Server-Sent Events (SSE) for real-time live sync
-      function connectSSE() {
-        if (!window.EventSource) return;
-        if (window.location.protocol === "file:") {
-          updateServerStatus(false);
-          return;
-        }
-
-        try {
-          if (eventSource) {
-            eventSource.close();
-          }
-
-          eventSource = new EventSource("/api/events");
-
-          eventSource.onopen = () => {
-            updateServerStatus(true);
-          };
-
-          eventSource.onerror = () => {
-            updateServerStatus(false);
-          };
-
-          eventSource.addEventListener("note_created", (e) => {
-            try {
-              const note = JSON.parse(e.data);
-              handleCreatedNote(note);
-            } catch (err) {
-              console.error("Failed to parse SSE note_created:", err);
-            }
-          });
-
-          eventSource.addEventListener("note_updated", (e) => {
-            try {
-              const note = JSON.parse(e.data);
-              handleUpdatedNote(note);
-            } catch (err) {
-              console.error("Failed to parse SSE note_updated:", err);
-            }
-          });
-
-          eventSource.addEventListener("note_deleted", (e) => {
-            try {
-              const data = JSON.parse(e.data);
-              handleDeletedNote(data.id || data);
-            } catch (err) {
-              console.error("Failed to parse SSE note_deleted:", err);
-            }
-          });
-        } catch (e) {
-          console.warn("SSE connection error:", e);
-        }
-      }
-
       function handleCreatedNote(note) {
         if (!note || !note.id) return;
         if (allNotes.some((n) => n.id === note.id)) return;
 
         allNotes.unshift(note);
+        rememberCurrentNotes();
         if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
         if (statLastSync) statLastSync.textContent = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
         showToast("Новая заметка добавлена");
@@ -2547,6 +2529,7 @@
         } else {
           allNotes.unshift(note);
         }
+        rememberCurrentNotes();
         if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
         if (statLastSync) statLastSync.textContent = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
         showToast("Заметка обновлена");
@@ -2558,6 +2541,7 @@
         const idx = allNotes.findIndex((n) => n.id === noteId);
         if (idx !== -1) {
           allNotes.splice(idx, 1);
+          rememberCurrentNotes();
           if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
           if (statLastSync) statLastSync.textContent = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
           showToast("Заметка удалена");
@@ -2710,6 +2694,7 @@
 
         // 1. Instant render from embedded initial notes (zero blank screen / zero delay)
         allNotes = getInitialNotes();
+        rememberCurrentNotes();
         if (allNotes.length > 0) {
           if (statTotalNotes) statTotalNotes.textContent = allNotes.length;
           renderTagsBar();
@@ -2719,8 +2704,7 @@
         // 2. Refresh from server API or static JSON
         fetchNotes();
 
-        // 3. Worker обновляет список коротким опросом вместо постоянного SSE-соединения.
-        window.setInterval(fetchNotes, 5000);
+        // 3. Новые данные загружаются только по явному нажатию кнопки «Обновить».
 
         // 4. Handle deep link navigation
         window.addEventListener("hashchange", handleAnchorScroll);

@@ -268,6 +268,23 @@ export async function updateNote(
     .first<NoteRow>();
 }
 
+export async function claimFailedNoteForRetry(
+  db: D1Database,
+  ownerTelegramId: number,
+  id: number,
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `UPDATE notes
+       SET processing_status = 'pending', updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND owner_telegram_id = ? AND processing_status = 'failed'
+       RETURNING id`,
+    )
+    .bind(id, ownerTelegramId)
+    .first<{ id: number }>();
+  return Boolean(row);
+}
+
 export async function deleteNote(db: D1Database, ownerTelegramId: number, id: number): Promise<boolean> {
   const result = await db
     .prepare("DELETE FROM notes WHERE id = ? AND owner_telegram_id = ?")

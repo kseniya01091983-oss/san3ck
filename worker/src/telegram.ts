@@ -2,6 +2,7 @@ import { analyzeTextMessage, describeImage, structureTextNote, summarizeExtracte
 import { isAllowedTelegramId } from "./access";
 import { createSiteLoginUrl } from "./auth";
 import {
+  claimFailedNoteForRetry,
   claimTelegramUpdate,
   clearConversationState,
   createNote,
@@ -21,8 +22,10 @@ import { extractPage } from "./tavily";
 import {
   answerCallback,
   downloadTelegramFile,
+  editMessageText,
   getTelegramFile,
   sendMessage,
+  sendMessageWithResult,
   sendTyping,
   type InlineButton,
 } from "./telegram-api";
@@ -73,16 +76,56 @@ function noteKeyboard(note: NoteApi | NoteRow): InlineButton[][] {
 function formatNote(note: NoteApi | NoteRow): string {
   const label = SECTION_LABELS[note.section] || "Задачи и быт";
   const pending = note.processing_status === "pending" ? "\n\n⏳ <i>Обрабатывается…</i>" : "";
-  const failed = note.processing_status === "failed" ? "\n\n⚠️ <i>Автоматическая обработка не завершена. Исходник сохранён.</i>" : "";
+  const failed = note.processing_status === "failed"
+    ? "\n\n⚠️ <i>Заметка сохранена, но нейросеть не смогла её обработать.</i>"
+    : "";
   const source = note.source_url ? `\n\n🔗 ${escapeHtml(note.source_url)}` : "";
   const text = truncate(note.text || note.summary || note.title, 3200);
   return `📁 <b>${escapeHtml(label)}</b> · <b>${escapeHtml(note.title || firstLine(text))}</b>\n\n${escapeHtml(text)}${source}${pending}${failed}`;
 }
 
-async function sendNote(env: Env, chatId: number, noteId: number, telegramId: number): Promise<void> {
+async function deliverMessage(
+  env: Env,
+  chatId: number,
+  text: string,
+  keyboard?: InlineButton[][],
+  replaceMessageId?: number | null,
+): Promise<void> {
+  if (replaceMessageId) {
+    try {
+      await editMessageText(env, chatId, replaceMessageId, text, keyboard);
+      return;
+    } catch (error) {
+      console.warn("Telegram editMessageText failed; sending a new message", error);
+    }
+  }
+  await sendMessage(env, chatId, text, keyboard);
+}
+
+async function announceSaved(env: Env, chatId: number, noteId: number): Promise<number | null> {
+  try {
+    const message = await sendMessageWithResult(
+      env,
+      chatId,
+      `✅ <b>Заметка №${noteId} сохранена.</b>\n⏳ Обрабатываю…`,
+    );
+    return Number.isInteger(message.message_id) ? message.message_id : null;
+  } catch (error) {
+    console.warn("Telegram processing announcement failed", error);
+    return null;
+  }
+}
+
+async function sendNote(
+  env: Env,
+  chatId: number,
+  noteId: number,
+  telegramId: number,
+  replaceMessageId?: number | null,
+): Promise<void> {
   const note = await getNoteApi(env.DB, telegramId, noteId);
   if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-  await sendMessage(env, chatId, formatNote(note), noteKeyboard(note));
+  await deliverMessage(env, chatId, formatNote(note), noteKeyboard(note), replaceMessageId);
 }
 
 function paginationKeyboard(notes: NoteApi[], page: number, totalPages: number): InlineButton[][] {
@@ -141,6 +184,7 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
     processingStatus: "pending",
     metadata: { created_from: "telegram", original_text_saved: true },
   });
+  const progressMessageId = await announceSaved(env, chatId, pending.id);
   const candidates = await searchNotesForAnswer(env.DB, telegramId, text);
   try {
     const analysis = await analyzeTextMessage(env, text, candidates, false);
@@ -149,7 +193,7 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
       const buttons = analysis.source_note_ids.map((id) => [
         { text: `Открыть источник №${id}`, callback_data: `view:${id}` },
       ]);
-      await sendMessage(env, chatId, escapeHtml(analysis.answer), buttons);
+      await deliverMessage(env, chatId, escapeHtml(analysis.answer), buttons, progressMessageId);
       return;
     }
     await updateNote(env.DB, telegramId, pending.id, {
@@ -158,14 +202,14 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
       processingStatus: "ready",
       metadata: { created_from: "telegram" },
     });
-    await sendNote(env, chatId, pending.id, telegramId);
+    await sendNote(env, chatId, pending.id, telegramId, progressMessageId);
   } catch (error) {
     await updateNote(env.DB, telegramId, pending.id, {
       status: "published",
       processingStatus: "failed",
       metadata: { created_from: "telegram", processing_error: error instanceof Error ? error.message : "unknown" },
     });
-    await sendNote(env, chatId, pending.id, telegramId);
+    await sendNote(env, chatId, pending.id, telegramId, progressMessageId);
   }
 }
 
@@ -182,6 +226,7 @@ async function saveLink(env: Env, chatId: number, rawText: string, url: string, 
     processingStatus: "pending",
     metadata: { created_from: "telegram" },
   });
+  const progressMessageId = await announceSaved(env, chatId, note.id);
   try {
     const extracted = await extractPage(env, url);
     const summary = await summarizeExtractedLink(env, url, caption, extracted.content);
@@ -197,7 +242,7 @@ async function saveLink(env: Env, chatId: number, rawText: string, url: string, 
       metadata: { created_from: "telegram", processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  await sendNote(env, chatId, note.id, telegramId);
+  await sendNote(env, chatId, note.id, telegramId, progressMessageId);
 }
 
 type IncomingFile = {
@@ -296,6 +341,7 @@ async function saveIncomingFile(
     processingStatus: "pending",
     metadata: baseMetadata,
   });
+  const progressMessageId = await announceSaved(env, chatId, note.id);
   try {
     const attachment = await insertAttachment(env.DB, {
       note_id: note.id,
@@ -342,7 +388,7 @@ async function saveIncomingFile(
       metadata: { ...baseMetadata, processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  await sendNote(env, chatId, note.id, telegramId);
+  await sendNote(env, chatId, note.id, telegramId, progressMessageId);
 }
 
 async function editNoteText(env: Env, chatId: number, noteId: number, text: string, telegramId: number): Promise<void> {
@@ -363,10 +409,25 @@ async function removeNote(env: Env, noteId: number, telegramId: number): Promise
   return deleteNote(env.DB, telegramId, noteId);
 }
 
-async function retryNote(env: Env, chatId: number, noteId: number, telegramId: number): Promise<void> {
+async function retryNote(
+  env: Env,
+  chatId: number,
+  noteId: number,
+  telegramId: number,
+  replaceMessageId?: number,
+): Promise<void> {
   const note = await getNote(env.DB, telegramId, noteId);
   if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-  await updateNote(env.DB, telegramId, noteId, { processingStatus: "pending" });
+  if (note.processing_status === "pending") {
+    return sendMessage(env, chatId, "⏳ Повторная обработка уже выполняется.");
+  }
+  if (note.processing_status !== "failed") {
+    return sendMessage(env, chatId, "✅ Эта заметка уже обработана.");
+  }
+  if (!(await claimFailedNoteForRetry(env.DB, telegramId, noteId))) {
+    return sendMessage(env, chatId, "⏳ Повторная обработка уже запущена.");
+  }
+  await sendNote(env, chatId, noteId, telegramId, replaceMessageId);
   try {
     if (note.type === "link" && note.source_url) {
       const extracted = await extractPage(env, note.source_url);
@@ -418,7 +479,7 @@ async function retryNote(env: Env, chatId: number, noteId: number, telegramId: n
       metadata: { processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
-  await sendNote(env, chatId, noteId, telegramId);
+  await sendNote(env, chatId, noteId, telegramId, replaceMessageId);
 }
 
 async function handleCommand(
@@ -529,7 +590,9 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
     await updateNote(env.DB, telegramId, id, { status: note.status === "published" ? "hidden" : "published" });
     return sendNote(env, chatId, id, telegramId);
   }
-  if (action === "retry" && Number.isInteger(id)) return retryNote(env, chatId, id, telegramId);
+  if (action === "retry" && Number.isInteger(id)) {
+    return retryNote(env, chatId, id, telegramId, callback.message?.message_id);
+  }
 }
 
 async function processUpdate(update: TelegramUpdate, env: Env): Promise<void> {

@@ -14,6 +14,10 @@ export interface TelegramFileInfo {
   file_path: string;
 }
 
+export interface TelegramSentMessage {
+  message_id: number;
+}
+
 async function telegramRequest<T>(
   env: Env,
   method: string,
@@ -39,6 +43,38 @@ export async function sendMessage(
 ): Promise<void> {
   await telegramRequest(env, "sendMessage", {
     chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
+export async function sendMessageWithResult(
+  env: Env,
+  chatId: number,
+  text: string,
+  keyboard?: InlineButton[][],
+): Promise<TelegramSentMessage> {
+  return telegramRequest<TelegramSentMessage>(env, "sendMessage", {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
+export async function editMessageText(
+  env: Env,
+  chatId: number,
+  messageId: number,
+  text: string,
+  keyboard?: InlineButton[][],
+): Promise<void> {
+  await telegramRequest(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
     text,
     parse_mode: "HTML",
     disable_web_page_preview: true,

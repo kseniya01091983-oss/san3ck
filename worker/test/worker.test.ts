@@ -5,7 +5,7 @@ import worker from "../src/index";
 import { isAllowedTelegramId } from "../src/access";
 import { createSiteLoginUrl, exchangeSiteToken, getSiteSessionTelegramId, hasSiteSession } from "../src/auth";
 import { structureTextNote, validateGroundedAnswer } from "../src/ai";
-import { claimTelegramUpdate, createNote, failStalePendingNotes, getNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, updateNote } from "../src/db";
+import { claimFailedNoteForRetry, claimTelegramUpdate, createNote, failStalePendingNotes, getNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, updateNote } from "../src/db";
 import { extractFirstUrl, normalizeTags } from "../src/utils";
 
 describe("FastNotes helpers", () => {
@@ -102,6 +102,21 @@ describe("D1 notes", () => {
     expect(await failStalePendingNotes(env.DB, 40004)).toBe(1);
     expect(await getNote(env.DB, 40004, stale.id)).toMatchObject({ status: "published", processing_status: "failed" });
     expect(await getNote(env.DB, 50005, other.id)).toMatchObject({ status: "draft", processing_status: "pending" });
+  });
+
+  it("allows only one retry claim for a failed note", async () => {
+    const failed = await createNote(env.DB, {
+      ownerTelegramId: 60006,
+      type: "note",
+      title: "Повтор",
+      text: "Запустить только один раз",
+      processingStatus: "failed",
+    });
+
+    expect(await claimFailedNoteForRetry(env.DB, 60006, failed.id)).toBe(true);
+    expect(await claimFailedNoteForRetry(env.DB, 60006, failed.id)).toBe(false);
+    expect(await claimFailedNoteForRetry(env.DB, 70007, failed.id)).toBe(false);
+    expect(await getNote(env.DB, 60006, failed.id)).toMatchObject({ processing_status: "pending" });
   });
 
   it("rejects an AI answer that cites a note outside D1 search results", async () => {
@@ -301,6 +316,101 @@ describe("Telegram access", () => {
         message: { message_id: 2, chat: { id: 999999999 }, from: { id: 999999999 }, text: "/start" },
       })).status).toBe(200);
       expect(String(sentMessages.at(-1)?.text)).toContain("Доступ закрыт");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("Telegram processing feedback", () => {
+  const sendUpdate = async (update: Record<string, unknown>) => {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(new Request("https://fastnotes.test/telegram/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret",
+      },
+      body: JSON.stringify(update),
+    }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    return response;
+  };
+
+  it("acknowledges a saved note immediately and replaces that message after success", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("api.telegram.org")) {
+        const method = url.split("/").at(-1) || "";
+        const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+        telegramCalls.push({ method, payload });
+        return Response.json({ ok: true, result: { message_id: 91001 } });
+      }
+      if (url.includes("openrouter.ai")) {
+        return Response.json({ choices: [{ message: { content: JSON.stringify({
+          intent: "create_note",
+          type: "task",
+          title: "Купить молоко",
+          summary: "Покупка на завтра",
+          text: "Купить молоко завтра",
+          tags: ["покупки", "задача"],
+          section: "tasks",
+        }) } }] });
+      }
+      return new Response("unexpected request", { status: 500 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      expect((await sendUpdate({
+        update_id: 82001,
+        message: { message_id: 1, chat: { id: 10001 }, from: { id: 10001 }, text: "Запиши купить молоко завтра" },
+      })).status).toBe(200);
+
+      const acknowledgement = telegramCalls.find((call) => call.method === "sendMessage");
+      const completion = telegramCalls.find((call) => call.method === "editMessageText");
+      expect(String(acknowledgement?.payload.text)).toContain("сохранена");
+      expect(String(acknowledgement?.payload.text)).toContain("Обрабатываю");
+      expect(completion?.payload.message_id).toBe(91001);
+      expect(String(completion?.payload.text)).toContain("Купить молоко");
+      expect(String(completion?.payload.text)).not.toContain("не смогла её обработать");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the source and shows a retry button when AI processing fails", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    const mockFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("api.telegram.org")) {
+        const method = url.split("/").at(-1) || "";
+        const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+        telegramCalls.push({ method, payload });
+        return Response.json({ ok: true, result: { message_id: 92001 } });
+      }
+      if (url.includes("openrouter.ai")) return new Response("provider unavailable", { status: 503 });
+      return new Response("unexpected request", { status: 500 });
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    try {
+      expect((await sendUpdate({
+        update_id: 82002,
+        message: { message_id: 2, chat: { id: 10001 }, from: { id: 10001 }, text: "Уникальная заметка при ошибке 82002" },
+      })).status).toBe(200);
+
+      const completion = telegramCalls.find((call) => call.method === "editMessageText");
+      expect(String(completion?.payload.text)).toContain("Заметка сохранена, но нейросеть не смогла её обработать");
+      const keyboard = completion?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> } | undefined;
+      expect(keyboard?.inline_keyboard?.flat().some((button) => String(button.callback_data).startsWith("retry:"))).toBe(true);
+
+      const saved = await listNotes(env.DB, 10001, { query: "Уникальная заметка при ошибке 82002", status: null });
+      expect(saved.items[0]).toMatchObject({
+        text: "Уникальная заметка при ошибке 82002",
+        processing_status: "failed",
+      });
     } finally {
       vi.unstubAllGlobals();
     }

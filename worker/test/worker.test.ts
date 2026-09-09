@@ -362,10 +362,14 @@ describe("Telegram usability", () => {
     }));
 
     try {
+      const notesBefore = await listNotes(env.DB, 10001, { status: null });
       expect((await sendUpdate({
         update_id: 83001,
         message: { message_id: 1, chat: { id: 10001 }, from: { id: 10001 }, text: "/start" },
       })).status).toBe(200);
+      const notesAfter = await listNotes(env.DB, 10001, { status: null });
+      expect(notesAfter.total).toBe(notesBefore.total);
+      expect(telegramCalls.map((call) => call.method)).toEqual(["setMyCommands", "sendMessage"]);
 
       const menu = telegramCalls.find((call) => call.method === "setMyCommands");
       const commands = menu?.payload.commands as Array<{ command?: string }> | undefined;
@@ -374,11 +378,46 @@ describe("Telegram usability", () => {
       ]));
 
       const welcome = telegramCalls.find((call) => call.method === "sendMessage");
+      const welcomeText = String(welcome?.payload.text);
+      expect(welcomeText).toContain("Интерстеллар");
+      expect(welcomeText).toContain("позвонить врачу");
+      expect(welcomeText).toContain("ссылку на статью");
+      expect(welcomeText).toContain("фотографию");
+      expect(welcomeText).toContain("/ask какие фильмы");
+      expect(welcomeText).toContain("пока не присылает напоминания");
       const keyboard = welcome?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string; url?: string }>> } | undefined;
       const buttons = keyboard?.inline_keyboard?.flat() || [];
+      expect(buttons).toHaveLength(4);
       expect(buttons.some((button) => button.callback_data === "page:0")).toBe(true);
       expect(buttons.some((button) => button.callback_data === "help_ask")).toBe(true);
+      expect(buttons.some((button) => button.callback_data === "help_full")).toBe(true);
       expect(buttons.some((button) => String(button.url).startsWith("https://fastnotes.test/auth/site?"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("opens the full help from the start button", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(input).split("/").at(-1) || "";
+      telegramCalls.push({ method, payload: JSON.parse(String(init?.body || "{}")) as Record<string, unknown> });
+      return Response.json({ ok: true, result: method === "sendMessage" ? { message_id: 93004 } : true });
+    }));
+
+    try {
+      expect((await sendUpdate({
+        update_id: 83004,
+        callback_query: {
+          id: "callback-help-full",
+          from: { id: 10001 },
+          message: { message_id: 4, chat: { id: 10001 } },
+          data: "help_full",
+        },
+      })).status).toBe(200);
+      expect(telegramCalls.map((call) => call.method)).toEqual(["answerCallbackQuery", "sendMessage"]);
+      expect(String(telegramCalls.at(-1)?.payload.text)).toContain("Как пользоваться FastNotes");
+      expect(String(telegramCalls.at(-1)?.payload.text)).toContain("/delete 12");
     } finally {
       vi.unstubAllGlobals();
     }

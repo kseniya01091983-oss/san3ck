@@ -97,11 +97,25 @@ async function sendStart(env: Env, chatId: number, telegramId: number): Promise<
   await sendMessage(
     env,
     chatId,
-    "<b>FastNotes</b>\n\nОтправьте мысль, ссылку, изображение или файл — я сразу сохраню исходник и аккуратно оформлю заметку.",
+    `<b>👋 Добро пожаловать в FastNotes!</b>
+
+Я сохраняю ваши заметки и помогаю находить их.
+
+Просто отправьте:
+🎬 <code>Хочу посмотреть фильм Интерстеллар</code>
+✅ <code>Завтра позвонить врачу в 10 утра</code>
+🔗 ссылку на статью
+🖼 фотографию или изображение
+
+Чтобы задать вопрос по заметкам:
+<code>/ask какие фильмы я хотел посмотреть?</code>
+
+ℹ️ Задачи сохраняются как заметки, но бот пока не присылает напоминания в назначенное время.`,
     [
       [{ text: "📝 Мои заметки", callback_data: "page:0" }],
       [{ text: "🌐 Открыть сайт", url: siteUrl }],
-      [{ text: "💬 Как задать вопрос", callback_data: "help_ask" }],
+      [{ text: "💬 Задать вопрос", callback_data: "help_ask" }],
+      [{ text: "📖 Полная справка", callback_data: "help_full" }],
     ],
   );
 }
@@ -622,6 +636,7 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
       "💬 Напишите команду и вопрос одним сообщением.\n\nНапример: <code>/ask какие фильмы я хотела посмотреть?</code>\n\nЯ отвечу только по вашим сохранённым заметкам.",
     );
   }
+  if (data === "help_full") return sendMessage(env, chatId, HELP_TEXT);
   if (data === "cancel_action") {
     await clearConversationState(env.DB, telegramId);
     return sendMessage(env, chatId, "🚫 Действие отменено.");

@@ -742,6 +742,30 @@
       display: flex;
       align-items: center;
     }
+    .search-results-meta {
+      min-height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+    .search-results-meta[hidden] {
+      display: none;
+    }
+    .search-reset-btn {
+      border: 0;
+      padding: 3px 6px;
+      background: transparent;
+      color: var(--accent-color);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .search-reset-btn:hover {
+      text-decoration: underline;
+    }
     .search-icon {
       position: absolute;
       left: 16px;
@@ -1238,6 +1262,12 @@
       transform: scale(0.92);
     }
 
+    .source-link-btn {
+      padding: 5px 10px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
     /* Empty State */
     .empty-state {
       grid-column: 1 / -1;
@@ -1513,6 +1543,13 @@
       .refresh-notes-btn span {
         display: none;
       }
+      .logout-btn {
+        width: 36px;
+        padding: 8px;
+      }
+      .logout-btn span {
+        display: none;
+      }
       .main-content {
         padding: 20px 16px 48px;
       }
@@ -1523,6 +1560,15 @@
       .footer-inner {
         flex-direction: column;
         text-align: center;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .status-capsule {
+        display: none;
+      }
+      .nav-actions {
+        gap: 7px;
       }
     }
 
@@ -1591,6 +1637,10 @@
         <button class="btn btn-secondary btn-icon" id="themeBtn" aria-label="Сменить тему" title="Сменить тему">
           <span id="themeIcon" aria-hidden="true">◐</span>
         </button>
+        <button class="btn btn-secondary logout-btn" id="logoutBtn" aria-label="Выйти с сайта" title="Выйти с сайта">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 17l5-5-5-5"></path><path d="M15 12H3"></path><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path></svg>
+          <span>Выйти</span>
+        </button>
         <button class="btn btn-primary" id="openCreateBtn">Создать</button>
       </div>
     </div>
@@ -1624,6 +1674,10 @@
           >
           <button class="search-clear" id="searchClear" aria-label="Очистить поиск">✕</button>
         </div>
+      </div>
+      <div class="search-results-meta" id="searchResultsMeta" aria-live="polite" hidden>
+        <span id="searchResultsCount">Найдено: 0</span>
+        <button type="button" class="search-reset-btn" id="resetFiltersBtn">Сбросить</button>
       </div>
     </div>
 
@@ -1831,6 +1885,10 @@
       const themeBtn = document.getElementById("themeBtn");
       const themeIcon = document.getElementById("themeIcon");
       const refreshNotesBtn = document.getElementById("refreshNotesBtn");
+      const logoutBtn = document.getElementById("logoutBtn");
+      const searchResultsMeta = document.getElementById("searchResultsMeta");
+      const searchResultsCount = document.getElementById("searchResultsCount");
+      const resetFiltersBtn = document.getElementById("resetFiltersBtn");
 
       // Modals
       const detailModal = document.getElementById("detailModal");
@@ -1996,6 +2054,16 @@
           .replace(/'/g, "&#039;");
       }
 
+      function safeExternalUrl(value) {
+        if (!value) return "";
+        try {
+          const url = new URL(String(value));
+          return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+        } catch (e) {
+          return "";
+        }
+      }
+
       // Format Note Body with Markdown & Hashtags
       function formatNoteText(text, highlightQuery = "") {
         let clean = escapeHtml(text);
@@ -2133,18 +2201,28 @@
           if (searchQuery) {
             const q = searchQuery.toLowerCase();
             const cleanQ = q.replace(/^[/#!]+/, "").trim();
-            const textMatch = (note.text || "").toLowerCase().includes(q) || (cleanQ && (note.text || "").toLowerCase().includes(cleanQ));
-            const tagMatch = (note.tags || []).some((t) => {
-              const lower = String(t).toLowerCase();
-              return lower.includes(q) || (cleanQ && lower.includes(cleanQ));
-            });
-            if (!textMatch && !tagMatch) return false;
+            const searchable = [
+              note.title || "",
+              note.summary || "",
+              note.text || "",
+              ...(note.tags || []),
+            ].join(" ").toLowerCase();
+            if (!searchable.includes(q) && !(cleanQ && searchable.includes(cleanQ))) return false;
           }
 
           return true;
         });
 
+        updateSearchResultsMeta();
         renderNotesGrid();
+      }
+
+      function updateSearchResultsMeta() {
+        const hasFilters = Boolean(
+          searchQuery || activeTag || (activeSection && activeSection !== "all")
+        );
+        if (searchResultsMeta) searchResultsMeta.hidden = !hasFilters;
+        if (searchResultsCount) searchResultsCount.textContent = `Найдено: ${filteredNotes.length}`;
       }
 
       // Render Notes in Grid
@@ -2193,6 +2271,7 @@
               ? `<div class="card-section-badge" onclick="event.stopPropagation(); window.selectSidebarSection('${matchedSec.id}')" title="Раздел: ${escapeHtml(matchedSec.label)}">${matchedSec.iconSvg}<span>${escapeHtml(matchedSec.label)}</span></div>`
               : "";
             const processingBadgeHtml = renderProcessingBadge(note);
+            const sourceUrl = safeExternalUrl(note.source_url);
 
             return `
               <article class="note-card" id="note-${note.id}" onclick="window.openNoteDetail(${note.id})">
@@ -2206,7 +2285,8 @@
                 <div>
                   <div class="card-footer">
                     <div class="card-actions">
-                      <button 
+                      ${sourceUrl ? `<a class="btn btn-secondary source-link-btn" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation();" aria-label="Открыть источник заметки">Источник ↗</a>` : ""}
+                      <button
                         class="action-icon-btn" 
                         title="Поделиться ссылкой на заметку" 
                         onclick="window.shareNoteLink(${note.id}, event)"
@@ -2291,12 +2371,17 @@
 
         modalNoteTags.innerHTML = `${sectionBadge}${renderProcessingBadge(note)}`;
 
-        modalNoteAttachments.innerHTML = (note.attachments || []).map((attachment) => {
+        const sourceUrl = safeExternalUrl(note.source_url);
+        const sourceLink = sourceUrl
+          ? `<a class="btn btn-secondary" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener">Открыть источник ↗</a>`
+          : "";
+        const attachmentLinks = (note.attachments || []).map((attachment) => {
           const label = attachment.mime_type && attachment.mime_type.startsWith("image/")
             ? `Открыть изображение: ${attachment.file_name}`
             : `Скачать файл: ${attachment.file_name}`;
           return `<a class="btn btn-secondary" href="${escapeHtml(attachment.url)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
         }).join("");
+        modalNoteAttachments.innerHTML = `${sourceLink}${attachmentLinks}`;
 
         modalToggleBtn.textContent = note.status === "hidden" ? "Показать" : "Скрыть";
         modalEditBtn.textContent = "Изменить";
@@ -2421,6 +2506,19 @@
         createModal.classList.remove("open");
       }
 
+      async function logout() {
+        if (!logoutBtn || logoutBtn.disabled) return;
+        logoutBtn.disabled = true;
+        try {
+          const response = await fetch("/auth/logout", { method: "POST" });
+          if (!response.ok) throw new Error("logout_failed");
+          window.location.assign("/");
+        } catch (error) {
+          logoutBtn.disabled = false;
+          showToast("Не удалось выйти. Попробуйте ещё раз");
+        }
+      }
+
       // Handle Create Note Form Submit
       createNoteForm.addEventListener("submit", async (e) => {
         e.preventDefault();
@@ -2438,7 +2536,7 @@
             closeCreateModal();
             showToast("Заметка сохранена");
             playChime();
-            // Prepend note locally if not immediately received via SSE
+            // Добавляем подтверждённую сервером заметку локально без фонового опроса.
             if (!allNotes.some((n) => n.id === created.id)) {
               allNotes.unshift(created);
               rememberCurrentNotes();
@@ -2461,6 +2559,8 @@
       if (cancelCreateBtn) cancelCreateBtn.addEventListener("click", closeCreateModal);
       if (openCreateBtn) openCreateBtn.addEventListener("click", openCreateModal);
       if (refreshNotesBtn) refreshNotesBtn.addEventListener("click", () => fetchNotes(true));
+      if (resetFiltersBtn) resetFiltersBtn.addEventListener("click", () => window.resetFilters());
+      if (logoutBtn) logoutBtn.addEventListener("click", logout);
 
       if (detailModal) {
         detailModal.addEventListener("click", (e) => {

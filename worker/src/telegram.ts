@@ -27,7 +27,9 @@ import {
   sendMessage,
   sendMessageWithResult,
   sendTyping,
+  setBotCommands,
   type InlineButton,
+  type TelegramBotCommand,
 } from "./telegram-api";
 import type {
   Env,
@@ -55,6 +57,54 @@ import {
 
 const NOTES_PER_PAGE = 5;
 const MAX_VISION_BYTES = 8 * 1024 * 1024;
+const BOT_COMMANDS: TelegramBotCommand[] = [
+  { command: "notes", description: "Показать мои заметки" },
+  { command: "ask", description: "Задать вопрос по заметкам" },
+  { command: "site", description: "Открыть сайт FastNotes" },
+  { command: "edit", description: "Изменить заметку по номеру" },
+  { command: "hide", description: "Скрыть заметку по номеру" },
+  { command: "show", description: "Показать скрытую заметку" },
+  { command: "delete", description: "Удалить заметку по номеру" },
+  { command: "cancel", description: "Отменить начатое действие" },
+  { command: "help", description: "Показать понятную справку" },
+];
+
+const HELP_TEXT = `<b>Как пользоваться FastNotes</b>
+
+Просто отправьте сообщение — бот сохранит его и подберёт заголовок, раздел и теги.
+
+🎬 <b>Фильм:</b> <code>Хочу посмотреть Интерстеллар</code>
+✅ <b>Задача:</b> <code>Завтра позвонить врачу в 10 утра</code>
+🔗 <b>Ссылка:</b> отправьте адрес страницы — бот сделает краткий пересказ.
+💬 <b>Вопрос по базе:</b> <code>/ask какие фильмы я хотела посмотреть?</code>
+
+<b>Команды</b>
+/notes — мои заметки
+/site — открыть сайт
+/edit 12 — изменить заметку №12
+/hide 12 — скрыть заметку
+/show 12 — показать заметку
+/delete 12 — удалить заметку
+/cancel — отменить редактирование
+
+ℹ️ Текст со временем сохраняется как задача, но бот пока не присылает напоминание в назначенный час.`;
+
+async function sendStart(env: Env, chatId: number, telegramId: number): Promise<void> {
+  await setBotCommands(env, BOT_COMMANDS).catch((error) => {
+    console.warn("Telegram setMyCommands failed", error);
+  });
+  const siteUrl = await createSiteLoginUrl(env, telegramId);
+  await sendMessage(
+    env,
+    chatId,
+    "<b>FastNotes</b>\n\nОтправьте мысль, ссылку, изображение или файл — я сразу сохраню исходник и аккуратно оформлю заметку.",
+    [
+      [{ text: "📝 Мои заметки", callback_data: "page:0" }],
+      [{ text: "🌐 Открыть сайт", url: siteUrl }],
+      [{ text: "💬 Как задать вопрос", callback_data: "help_ask" }],
+    ],
+  );
+}
 
 function noteKeyboard(note: NoteApi | NoteRow): InlineButton[][] {
   const failed = note.processing_status === "failed"
@@ -490,11 +540,15 @@ async function handleCommand(
   telegramId: number,
 ): Promise<void> {
   const chatId = message.chat.id;
-  if (["start", "help"].includes(command)) {
+  if (command === "start") return sendStart(env, chatId, telegramId);
+  if (command === "help") return sendMessage(env, chatId, HELP_TEXT);
+  if (command === "cancel") {
+    const state = await getConversationState(env.DB, telegramId);
+    await clearConversationState(env.DB, telegramId);
     return sendMessage(
       env,
       chatId,
-      "<b>FastNotes</b>\n\nОтправьте мысль, ссылку, изображение или файл — сохраню и структурирую.\n\nКоманды: /notes, /ask, /site, /edit, /hide, /show, /delete",
+      state ? "🚫 Начатое действие отменено." : "ℹ️ Сейчас нет действия, которое нужно отменить.",
     );
   }
   if (["notes", "list"].includes(command)) return sendNotesPage(env, chatId, 0, telegramId);
@@ -561,6 +615,13 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
   await answerCallback(env, callback.id).catch(() => undefined);
   if (!chatId) return;
   if (data === "noop") return;
+  if (data === "help_ask") {
+    return sendMessage(
+      env,
+      chatId,
+      "💬 Напишите команду и вопрос одним сообщением.\n\nНапример: <code>/ask какие фильмы я хотела посмотреть?</code>\n\nЯ отвечу только по вашим сохранённым заметкам.",
+    );
+  }
   if (data === "cancel_action") {
     await clearConversationState(env.DB, telegramId);
     return sendMessage(env, chatId, "🚫 Действие отменено.");

@@ -18,6 +18,11 @@ export interface TelegramSentMessage {
   message_id: number;
 }
 
+export interface TelegramBotCommand {
+  command: string;
+  description: string;
+}
+
 async function telegramRequest<T>(
   env: Env,
   method: string,
@@ -87,6 +92,10 @@ export async function answerCallback(env: Env, callbackQueryId: string, text?: s
     callback_query_id: callbackQueryId,
     ...(text ? { text } : {}),
   });
+}
+
+export async function setBotCommands(env: Env, commands: TelegramBotCommand[]): Promise<void> {
+  await telegramRequest(env, "setMyCommands", { commands });
 }
 
 export async function sendTyping(env: Env, chatId: number): Promise<void> {

@@ -5,7 +5,7 @@ import worker from "../src/index";
 import { isAllowedTelegramId } from "../src/access";
 import { createSiteLoginUrl, exchangeSiteToken, getSiteSessionTelegramId, hasSiteSession } from "../src/auth";
 import { structureTextNote, validateGroundedAnswer } from "../src/ai";
-import { claimFailedNoteForRetry, claimTelegramUpdate, createNote, failStalePendingNotes, getNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, updateNote } from "../src/db";
+import { claimFailedNoteForRetry, claimTelegramUpdate, createNote, failStalePendingNotes, getConversationState, getNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, setConversationState, updateNote } from "../src/db";
 import { extractFirstUrl, normalizeTags } from "../src/utils";
 
 describe("FastNotes helpers", () => {
@@ -208,6 +208,21 @@ describe("site login", () => {
 });
 
 describe("Worker API", () => {
+  it("logs out an authenticated site session", async () => {
+    const exchange = await exchangeSiteToken(new Request(await createSiteLoginUrl(env, 10001)), env);
+    const cookie = String(exchange.headers.get("Set-Cookie")).split(";", 1)[0];
+    const response = await worker.fetch(
+      new Request("https://fastnotes.test/auth/logout", {
+        method: "POST",
+        headers: { Cookie: cookie, Origin: "https://fastnotes.test" },
+      }),
+      env,
+      createExecutionContext(),
+    );
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Set-Cookie")).toContain("Max-Age=0");
+  });
+
   it("supports authenticated CRUD routes", async () => {
     const exchange = await exchangeSiteToken(new Request(await createSiteLoginUrl(env, 10001)), env);
     const setCookie = exchange.headers.get("Set-Cookie");
@@ -316,6 +331,111 @@ describe("Telegram access", () => {
         message: { message_id: 2, chat: { id: 999999999 }, from: { id: 999999999 }, text: "/start" },
       })).status).toBe(200);
       expect(String(sentMessages.at(-1)?.text)).toContain("Доступ закрыт");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("Telegram usability", () => {
+  const sendUpdate = async (update: Record<string, unknown>) => {
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(new Request("https://fastnotes.test/telegram/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret",
+      },
+      body: JSON.stringify(update),
+    }), env, ctx);
+    await waitOnExecutionContext(ctx);
+    return response;
+  };
+
+  it("registers the command menu and sends useful start buttons", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(input).split("/").at(-1) || "";
+      const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+      telegramCalls.push({ method, payload });
+      return Response.json({ ok: true, result: method === "sendMessage" ? { message_id: 93001 } : true });
+    }));
+
+    try {
+      expect((await sendUpdate({
+        update_id: 83001,
+        message: { message_id: 1, chat: { id: 10001 }, from: { id: 10001 }, text: "/start" },
+      })).status).toBe(200);
+
+      const menu = telegramCalls.find((call) => call.method === "setMyCommands");
+      const commands = menu?.payload.commands as Array<{ command?: string }> | undefined;
+      expect(commands?.map((command) => command.command)).toEqual(expect.arrayContaining([
+        "notes", "ask", "site", "edit", "hide", "show", "delete", "cancel", "help",
+      ]));
+
+      const welcome = telegramCalls.find((call) => call.method === "sendMessage");
+      const keyboard = welcome?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string; url?: string }>> } | undefined;
+      const buttons = keyboard?.inline_keyboard?.flat() || [];
+      expect(buttons.some((button) => button.callback_data === "page:0")).toBe(true);
+      expect(buttons.some((button) => button.callback_data === "help_ask")).toBe(true);
+      expect(buttons.some((button) => String(button.url).startsWith("https://fastnotes.test/auth/site?"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows examples in help without registering commands again", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(input).split("/").at(-1) || "";
+      telegramCalls.push({ method, payload: JSON.parse(String(init?.body || "{}")) as Record<string, unknown> });
+      return Response.json({ ok: true, result: { message_id: 93002 } });
+    }));
+
+    try {
+      expect((await sendUpdate({
+        update_id: 83002,
+        message: { message_id: 2, chat: { id: 10001 }, from: { id: 10001 }, text: "/help" },
+      })).status).toBe(200);
+      expect(telegramCalls.some((call) => call.method === "setMyCommands")).toBe(false);
+      const help = telegramCalls.find((call) => call.method === "sendMessage");
+      expect(String(help?.payload.text)).toContain("Интерстеллар");
+      expect(String(help?.payload.text)).toContain("/ask какие фильмы");
+      expect(String(help?.payload.text)).toContain("пока не присылает напоминание");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("cancels only the current user's editing state", async () => {
+    const ownerNote = await createNote(env.DB, {
+      ownerTelegramId: 10001,
+      type: "note",
+      title: "Редактирование владельца",
+      text: "Тест отмены владельца",
+    });
+    const teacherNote = await createNote(env.DB, {
+      ownerTelegramId: 126041348,
+      type: "note",
+      title: "Редактирование преподавателя",
+      text: "Тест изоляции преподавателя",
+    });
+    await setConversationState(env.DB, 10001, "edit", ownerNote.id);
+    await setConversationState(env.DB, 126041348, "edit", teacherNote.id);
+    const sent: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body || "{}")) as Record<string, unknown>);
+      return Response.json({ ok: true, result: { message_id: 93003 } });
+    }));
+
+    try {
+      expect((await sendUpdate({
+        update_id: 83003,
+        message: { message_id: 3, chat: { id: 10001 }, from: { id: 10001 }, text: "/cancel" },
+      })).status).toBe(200);
+      expect(await getConversationState(env.DB, 10001)).toBeNull();
+      expect(await getConversationState(env.DB, 126041348)).toMatchObject({ action: "edit", note_id: teacherNote.id });
+      expect(String(sent.at(-1)?.text)).toContain("отменено");
     } finally {
       vi.unstubAllGlobals();
     }

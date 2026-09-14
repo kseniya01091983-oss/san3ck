@@ -195,7 +195,10 @@ describe("site login", () => {
   it("rejects a changed token", async () => {
     const url = new URL(await createSiteLoginUrl(env, 10001));
     const token = url.searchParams.get("token")!;
-    url.searchParams.set("token", `${token.slice(0, -1)}x`);
+    const [payload, signature] = token.split(".");
+    const changedAt = Math.floor(signature.length / 2);
+    const replacement = signature[changedAt] === "a" ? "b" : "a";
+    url.searchParams.set("token", `${payload}.${signature.slice(0, changedAt)}${replacement}${signature.slice(changedAt + 1)}`);
     expect((await exchangeSiteToken(new Request(url), env)).status).toBe(401);
   });
 

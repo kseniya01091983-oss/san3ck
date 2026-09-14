@@ -14,9 +14,11 @@ import { getTmdbCard, searchTmdb, tmdbSearchQueries, unambiguousTmdbResult } fro
 import type { Env } from "../src/types";
 import {
   deleteNoteVector,
+  reindexFailureMessage,
   reindexOwner,
   searchRagNotes,
   syncNoteVector,
+  UpstashRequestError,
   vectorNamespace,
   vectorText,
 } from "../src/upstash";
@@ -32,6 +34,12 @@ function integrationEnv(overrides: Partial<Env> = {}): Env {
 }
 
 describe("Upstash RAG", () => {
+  it("explains safe reindex configuration errors without exposing secrets", () => {
+    expect(reindexFailureMessage(new UpstashRequestError("upsert-data", 401))).toContain("не Read-only Token");
+    expect(reindexFailureMessage(new UpstashRequestError("upsert-data", 422))).toContain("Sparse BM25");
+    expect(reindexFailureMessage(new Error("secret-value"))).not.toContain("secret-value");
+  });
+
   it("derives isolated namespaces without exposing Telegram IDs", async () => {
     const owner = await vectorNamespace(env, 10001);
     const teacher = await vectorNamespace(env, 126041348);

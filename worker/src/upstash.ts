@@ -13,6 +13,30 @@ interface UpstashQueryResult {
   score: number;
 }
 
+export class UpstashRequestError extends Error {
+  constructor(
+    readonly command: string,
+    readonly status: number,
+  ) {
+    super(`Upstash ${command}: HTTP ${status}`);
+    this.name = "UpstashRequestError";
+  }
+}
+
+export function reindexFailureMessage(error: unknown): string {
+  const intact = "Заметки целы, обычный поиск D1 продолжает работать.";
+  if (!(error instanceof UpstashRequestError)) {
+    return `⚠️ Upstash временно не ответил. ${intact}`;
+  }
+  if (error.status === 401 || error.status === 403) {
+    return `⚠️ Upstash отклонил ключ. В Cloudflare Secret UPSTASH_VECTOR_REST_TOKEN должен быть обычный Token, не Read-only Token. ${intact}`;
+  }
+  if (error.status === 400 || error.status === 422) {
+    return `⚠️ Upstash не принял текст. Проверьте индекс: Hybrid, Dense openai/text-embedding-3-small, Sparse BM25. ${intact}`;
+  }
+  return `⚠️ Upstash вернул ошибку HTTP ${error.status}. ${intact}`;
+}
+
 function configured(env: Env): boolean {
   return Boolean(env.UPSTASH_VECTOR_REST_URL && env.UPSTASH_VECTOR_REST_TOKEN);
 }
@@ -39,7 +63,7 @@ async function request<T>(
     signal: AbortSignal.timeout(6_000),
   });
   if (allowNotFound && response.status === 404) return {} as T;
-  if (!response.ok) throw new Error(`Upstash ${command}: HTTP ${response.status}`);
+  if (!response.ok) throw new UpstashRequestError(command, response.status);
   return response.json<T>();
 }
 

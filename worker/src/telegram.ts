@@ -56,7 +56,7 @@ import {
   tagsFromText,
   truncate,
 } from "./utils";
-import { deleteNoteVector, reindexOwner, searchRagNotes, syncNoteVector } from "./upstash";
+import { deleteNoteVector, reindexFailureMessage, reindexOwner, searchRagNotes, syncNoteVector } from "./upstash";
 
 const NOTES_PER_PAGE = 5;
 const MAX_VISION_BYTES = 8 * 1024 * 1024;
@@ -775,7 +775,7 @@ async function handleCommand(
       return sendMessage(env, chatId, `✅ Смысловой индекс готов: ${count} заметок.`);
     } catch (error) {
       console.warn("Upstash reindex failed", error);
-      return sendMessage(env, chatId, "⚠️ Не удалось пересобрать смысловой индекс. Обычный поиск D1 продолжает работать.");
+      return sendMessage(env, chatId, reindexFailureMessage(error));
     }
   }
   if (command === "cancel") {

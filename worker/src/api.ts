@@ -12,6 +12,7 @@ import {
 } from "./db";
 import { downloadTelegramFile, getTelegramFile } from "./telegram-api";
 import type { Env, NoteSection, NoteStatus, NoteType } from "./types";
+import { deleteNoteVector, syncNoteVector } from "./upstash";
 import {
   firstLine,
   jsonResponse,
@@ -95,6 +96,7 @@ async function handleCreate(request: Request, env: Env, telegramId: number): Pro
       metadata: { created_from: "web", processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
+  await syncNoteVector(env, row).catch((error) => console.warn("Vector sync after web create failed", error));
   return jsonResponse(await getNoteApi(env.DB, telegramId, row.id), 201);
 }
 
@@ -130,7 +132,10 @@ async function handleUpdate(request: Request, id: number, env: Env, telegramId: 
   if (body.section !== undefined) input.section = normalizeSection(body.section);
   if (body.status !== undefined) input.status = normalizeStatus(body.status);
 
-  await updateNote(env.DB, telegramId, id, input);
+  const updated = await updateNote(env.DB, telegramId, id, input);
+  if (updated) {
+    await syncNoteVector(env, updated).catch((error) => console.warn("Vector sync after web update failed", error));
+  }
   return jsonResponse(await getNoteApi(env.DB, telegramId, id));
 }
 
@@ -161,7 +166,11 @@ export async function handleApi(request: Request, env: Env, telegramId: number):
     if (noteId !== null && request.method === "GET") return handleGet(noteId, env, telegramId);
     if (noteId !== null && ["PUT", "PATCH"].includes(request.method)) return handleUpdate(request, noteId, env, telegramId);
     if (noteId !== null && request.method === "DELETE") {
+      const existing = await getNote(env.DB, telegramId, noteId);
       const removed = await deleteNote(env.DB, telegramId, noteId);
+      if (removed && existing && existing.vector_status !== "not_indexed") {
+        await deleteNoteVector(env, telegramId, noteId).catch((error) => console.warn("Vector delete failed", error));
+      }
       return removed ? new Response(null, { status: 204 }) : jsonResponse({ error: "Заметка не найдена" }, 404);
     }
 

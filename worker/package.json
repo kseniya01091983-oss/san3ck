@@ -12,7 +12,8 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
     "db:export:legacy": "python scripts/export_sqlite_to_d1.py",
-    "setup:secrets": "node scripts/setup_secrets.mjs"
+    "setup:secrets": "node scripts/setup_secrets.mjs",
+    "setup:integrations": "node scripts/setup_integrations.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "latest",

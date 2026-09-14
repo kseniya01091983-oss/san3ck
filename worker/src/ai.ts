@@ -19,6 +19,7 @@ interface OpenRouterMessage {
 
 export type MessageAnalysis =
   | { intent: "create_note"; note: StructuredNote }
+  | { intent: "media_lookup"; query: string; media_type: "movie" | "tv" | "any" }
   | ({ intent: "answer_question" } & AnswerResult);
 
 const GLM_PROVIDERS = ["deepinfra", "novita", "z-ai", "gmicloud"] as const;
@@ -160,7 +161,7 @@ export async function analyzeTextMessage(
     };
   }
 
-  const prompt = `Ты — персональный ассистент FastNotes. Определи, пользователь задаёт вопрос по своей базе или сохраняет новую запись.
+  const prompt = `Ты — персональный ассистент FastNotes. Определи, пользователь задаёт вопрос по своей базе, хочет найти фильм/сериал для сохранения или сохраняет новую запись.
 
 Правила:
 1. Если force_question=true, intent всегда answer_question.
@@ -170,9 +171,12 @@ export async function analyzeTextMessage(
 5. Тип новой текстовой записи: note, task, idea или recommendation.
 6. Раздел: games, movies, work, tasks или tech.
 7. Без эмодзи и без выдуманных фактов.
+8. Если пользователь явно хочет добавить или посмотреть конкретный фильм/сериал, верни media_lookup. query — только название без слов «добавь», «хочу посмотреть», «фильм», «сериал». media_type: movie, tv или any.
+9. Не используй media_lookup для общих заметок о кино и вопросов по уже сохранённой базе.
 
 Верни только JSON одного из форматов:
 {"intent":"answer_question","answer":"...","source_note_ids":[1,2]}
+{"intent":"media_lookup","query":"Интерстеллар","media_type":"movie|tv|any"}
 {"intent":"create_note","type":"note|task|idea|recommendation","title":"...","summary":"...","text":"...","tags":["..."],"section":"games|movies|work|tasks|tech"}
 
 force_question=${forceQuestion ? "true" : "false"}
@@ -190,6 +194,14 @@ ${candidateNotes.length ? contextForNotes(candidateNotes) : "(подходящи
 
   if (result.intent === "answer_question" || forceQuestion) {
     return { intent: "answer_question", ...validateGroundedAnswer(result, candidateNotes) };
+  }
+
+  if (result.intent === "media_lookup") {
+    const query = truncate(String(result.query || "").trim(), 200);
+    const mediaType = ["movie", "tv", "any"].includes(String(result.media_type))
+      ? String(result.media_type) as "movie" | "tv" | "any"
+      : "any";
+    if (query) return { intent: "media_lookup", query, media_type: mediaType };
   }
 
   return { intent: "create_note", note: structuredNote(result, text) };

@@ -23,7 +23,18 @@ export interface Env {
   OPENROUTER_API_KEY: string;
   TAVILY_API_KEY: string;
   SITE_AUTH_SECRET: string;
+  UPSTASH_VECTOR_REST_URL?: string;
+  UPSTASH_VECTOR_REST_TOKEN?: string;
+  TMDB_READ_ACCESS_TOKEN?: string;
   INTEGRATION_TEST_SECRET?: string;
+}
+
+export type VectorStatus = "not_indexed" | "pending" | "synced" | "failed";
+
+export interface ExternalReference {
+  provider: string;
+  kind: string;
+  id: string;
 }
 
 export interface NoteRow {
@@ -39,6 +50,12 @@ export interface NoteRow {
   source_url: string | null;
   processing_status: ProcessingStatus;
   metadata_json: string;
+  external_provider: string | null;
+  external_kind: string | null;
+  external_id: string | null;
+  vector_status: VectorStatus;
+  vector_content_hash: string | null;
+  vector_indexed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -82,6 +99,7 @@ export interface NoteApi {
   created_at: string;
   updated_at: string;
   attachments: AttachmentApi[];
+  external?: ExternalReference;
 }
 
 export interface TelegramUser {

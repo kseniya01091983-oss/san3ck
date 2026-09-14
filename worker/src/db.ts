@@ -7,6 +7,7 @@ import type {
   NoteStatus,
   NoteType,
   ProcessingStatus,
+  VectorStatus,
 } from "./types";
 import { normalizeTags, parseJson } from "./utils";
 
@@ -22,6 +23,9 @@ export interface CreateNoteInput {
   sourceUrl?: string | null;
   processingStatus?: ProcessingStatus;
   metadata?: Record<string, unknown>;
+  externalProvider?: string | null;
+  externalKind?: string | null;
+  externalId?: string | null;
 }
 
 export interface UpdateNoteInput {
@@ -67,7 +71,7 @@ export function attachmentToApi(row: AttachmentRow): AttachmentApi {
 }
 
 export function noteToApi(row: NoteRow, attachments: AttachmentRow[] = []): NoteApi {
-  return {
+  const note: NoteApi = {
     id: row.id,
     type: row.type,
     title: row.title,
@@ -83,6 +87,14 @@ export function noteToApi(row: NoteRow, attachments: AttachmentRow[] = []): Note
     updated_at: row.updated_at,
     attachments: attachments.map(attachmentToApi),
   };
+  if (row.external_provider && row.external_kind && row.external_id) {
+    note.external = {
+      provider: row.external_provider,
+      kind: row.external_kind,
+      id: row.external_id,
+    };
+  }
+  return note;
 }
 
 export async function createNote(db: D1Database, input: CreateNoteInput): Promise<NoteRow> {
@@ -90,8 +102,9 @@ export async function createNote(db: D1Database, input: CreateNoteInput): Promis
     .prepare(
       `INSERT INTO notes (
         owner_telegram_id, type, title, summary, text, tags_json, section,
-        status, source_url, processing_status, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        status, source_url, processing_status, metadata_json,
+        external_provider, external_kind, external_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
     )
     .bind(
       input.ownerTelegramId,
@@ -105,6 +118,9 @@ export async function createNote(db: D1Database, input: CreateNoteInput): Promis
       input.sourceUrl || null,
       input.processingStatus || "ready",
       JSON.stringify(input.metadata || {}),
+      input.externalProvider || null,
+      input.externalKind || null,
+      input.externalId || null,
     )
     .first<NoteRow>();
   if (!row) throw new Error("D1 did not return the created note");
@@ -238,6 +254,84 @@ export async function searchNotesForAnswer(
   return result.items;
 }
 
+export async function getPublishedNotesByIds(
+  db: D1Database,
+  ownerTelegramId: number,
+  ids: number[],
+): Promise<NoteApi[]> {
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => "?").join(",");
+  const result = await db
+    .prepare(
+      `SELECT * FROM notes
+       WHERE owner_telegram_id = ?
+         AND status = 'published'
+         AND processing_status = 'ready'
+         AND id IN (${placeholders})`,
+    )
+    .bind(ownerTelegramId, ...ids)
+    .all<NoteRow>();
+  const byId = new Map((result.results || []).map((row) => [row.id, noteToApi(row)]));
+  return ids.map((id) => byId.get(id)).filter((note): note is NoteApi => Boolean(note));
+}
+
+export async function listVectorizableNotes(db: D1Database, ownerTelegramId: number): Promise<NoteRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT * FROM notes
+       WHERE owner_telegram_id = ? AND status = 'published' AND processing_status = 'ready'
+       ORDER BY id`,
+    )
+    .bind(ownerTelegramId)
+    .all<NoteRow>();
+  return result.results || [];
+}
+
+export async function markNoteVector(
+  db: D1Database,
+  ownerTelegramId: number,
+  id: number,
+  status: VectorStatus,
+  contentHash: string | null,
+  indexedAt: string | null,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE notes
+       SET vector_status = ?, vector_content_hash = ?, vector_indexed_at = ?
+       WHERE id = ? AND owner_telegram_id = ?`,
+    )
+    .bind(status, contentHash, indexedAt, id, ownerTelegramId)
+    .run();
+}
+
+export async function markOwnerVectorsNotIndexed(db: D1Database, ownerTelegramId: number): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE notes
+       SET vector_status = 'not_indexed', vector_content_hash = NULL, vector_indexed_at = NULL
+       WHERE owner_telegram_id = ?`,
+    )
+    .bind(ownerTelegramId)
+    .run();
+}
+
+export async function findExternalNote(
+  db: D1Database,
+  ownerTelegramId: number,
+  provider: string,
+  kind: string,
+  externalId: string,
+): Promise<NoteRow | null> {
+  return db
+    .prepare(
+      `SELECT * FROM notes
+       WHERE owner_telegram_id = ? AND external_provider = ? AND external_kind = ? AND external_id = ?`,
+    )
+    .bind(ownerTelegramId, provider, kind, externalId)
+    .first<NoteRow>();
+}
+
 export async function updateNote(
   db: D1Database,
   ownerTelegramId: number,
@@ -357,33 +451,35 @@ export async function setConversationState(
   action: string,
   noteId: number | null,
   ttlMinutes = 30,
+  payload: Record<string, unknown> = {},
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO conversation_state(owner_telegram_id, action, note_id, expires_at, updated_at)
-       VALUES (?, ?, ?, datetime('now', ?), CURRENT_TIMESTAMP)
+      `INSERT INTO conversation_state(owner_telegram_id, action, note_id, expires_at, updated_at, payload_json)
+       VALUES (?, ?, ?, datetime('now', ?), CURRENT_TIMESTAMP, ?)
        ON CONFLICT(owner_telegram_id) DO UPDATE SET
          action = excluded.action,
          note_id = excluded.note_id,
          expires_at = excluded.expires_at,
-         updated_at = CURRENT_TIMESTAMP`,
+         updated_at = CURRENT_TIMESTAMP,
+         payload_json = excluded.payload_json`,
     )
-    .bind(ownerTelegramId, action, noteId, `+${ttlMinutes} minutes`)
+    .bind(ownerTelegramId, action, noteId, `+${ttlMinutes} minutes`, JSON.stringify(payload))
     .run();
 }
 
 export async function getConversationState(
   db: D1Database,
   ownerTelegramId: number,
-): Promise<{ action: string; note_id: number | null } | null> {
+): Promise<{ action: string; note_id: number | null; payload: Record<string, unknown> } | null> {
   const state = await db
     .prepare(
-      "SELECT action, note_id FROM conversation_state WHERE owner_telegram_id = ? AND expires_at > CURRENT_TIMESTAMP",
+      "SELECT action, note_id, payload_json FROM conversation_state WHERE owner_telegram_id = ? AND expires_at > CURRENT_TIMESTAMP",
     )
     .bind(ownerTelegramId)
-    .first<{ action: string; note_id: number | null }>();
+    .first<{ action: string; note_id: number | null; payload_json: string }>();
   if (!state) await clearConversationState(db, ownerTelegramId);
-  return state;
+  return state ? { action: state.action, note_id: state.note_id, payload: parseJson(state.payload_json, {}) } : null;
 }
 
 export async function clearConversationState(db: D1Database, ownerTelegramId: number): Promise<void> {

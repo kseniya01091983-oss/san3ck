@@ -70,6 +70,22 @@ export async function sendMessageWithResult(
   });
 }
 
+export async function sendPhoto(
+  env: Env,
+  chatId: number,
+  photoUrl: string,
+  caption: string,
+  keyboard?: InlineButton[][],
+): Promise<void> {
+  await telegramRequest(env, "sendPhoto", {
+    chat_id: chatId,
+    photo: photoUrl,
+    caption,
+    parse_mode: "HTML",
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
 export async function editMessageText(
   env: Env,
   chatId: number,

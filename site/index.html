@@ -1029,6 +1029,51 @@
     .note-card.highlight-new {
       animation: appleGlowEntrance 1.8s var(--ease-spring);
     }
+    .tmdb-card-layout {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      min-width: 0;
+    }
+    .tmdb-card-copy {
+      min-width: 0;
+      flex: 1;
+    }
+    .tmdb-poster,
+    .tmdb-poster-placeholder {
+      width: 86px;
+      aspect-ratio: 2 / 3;
+      flex: 0 0 86px;
+      border-radius: 12px;
+      object-fit: cover;
+      background: linear-gradient(145deg, var(--tag-bg), var(--bg-surface-hover));
+      border: 1px solid var(--border-subtle);
+      box-shadow: var(--shadow-sm);
+    }
+    .tmdb-poster-placeholder {
+      display: grid;
+      place-items: center;
+      color: var(--text-tertiary);
+      font-size: 28px;
+    }
+    .tmdb-modal-card {
+      display: grid;
+      grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
+      gap: 24px;
+      align-items: start;
+    }
+    .tmdb-modal-card .tmdb-poster,
+    .tmdb-modal-card .tmdb-poster-placeholder {
+      width: 100%;
+      max-width: 210px;
+      border-radius: 16px;
+    }
+    .tmdb-facts {
+      margin: 0 0 16px;
+      color: var(--text-secondary);
+      font-size: 14px;
+      line-height: 1.6;
+    }
     @keyframes appleSpringIn {
       0% { opacity: 0; transform: translateY(18px) scale(0.96); }
       100% { opacity: 1; transform: translateY(0) scale(1); }
@@ -1522,11 +1567,32 @@
     .footer-links a:hover {
       text-decoration: underline;
     }
+    .tmdb-attribution {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      text-align: left;
+      max-width: 560px;
+    }
+    .tmdb-attribution img {
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+    }
 
     /* ==========================================================================
        RESPONSIVENESS & ACCESSIBILITY
        ========================================================================== */
     @media (max-width: 768px) {
+      .tmdb-modal-card {
+        grid-template-columns: 96px minmax(0, 1fr);
+        gap: 16px;
+      }
+      .tmdb-modal-card .tmdb-poster,
+      .tmdb-modal-card .tmdb-poster-placeholder {
+        max-width: 96px;
+      }
       .nav-inner {
         padding: 10px 16px;
       }
@@ -1753,6 +1819,12 @@
   <footer class="site-footer">
     <div class="footer-inner">
       <div><b>FastNotes</b> — Синхронизировано с Telegram-ботом.</div>
+      <div class="tmdb-attribution">
+        <a href="https://www.themoviedb.org" target="_blank" rel="noopener" aria-label="The Movie Database">
+          <img src="https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg" alt="TMDB">
+        </a>
+        <span>Этот продукт использует API TMDB, но не одобрен и не сертифицирован TMDB.</span>
+      </div>
       <div class="footer-links">
         <a href="#top" onclick="window.scrollTo({top:0, behavior:'smooth'})">Наверх ↑</a>
       </div>
@@ -2064,6 +2136,31 @@
         }
       }
 
+      function tmdbData(note) {
+        const value = note && note.metadata && note.metadata.tmdb;
+        if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+        if (!note.external || note.external.provider !== "tmdb") return null;
+        return value;
+      }
+
+      function safeTmdbPoster(value) {
+        if (!value) return "";
+        try {
+          const url = new URL(String(value));
+          return url.protocol === "https:" && url.hostname === "image.tmdb.org" ? url.href : "";
+        } catch (e) {
+          return "";
+        }
+      }
+
+      function tmdbPosterHtml(tmdb, large = false) {
+        const poster = safeTmdbPoster(tmdb && tmdb.posterUrl);
+        const className = large ? "tmdb-poster tmdb-poster-large" : "tmdb-poster";
+        return poster
+          ? `<img class="${className}" src="${escapeHtml(poster)}" alt="Постер ${escapeHtml(tmdb.title || "")}" loading="lazy" referrerpolicy="no-referrer">`
+          : '<div class="tmdb-poster-placeholder" aria-label="Постер отсутствует">🎬</div>';
+      }
+
       // Format Note Body with Markdown & Hashtags
       function formatNoteText(text, highlightQuery = "") {
         let clean = escapeHtml(text);
@@ -2272,13 +2369,18 @@
               : "";
             const processingBadgeHtml = renderProcessingBadge(note);
             const sourceUrl = safeExternalUrl(note.source_url);
+            const tmdb = tmdbData(note);
+            const tmdbPoster = tmdb ? tmdbPosterHtml(tmdb) : "";
 
             return `
               <article class="note-card" id="note-${note.id}" onclick="window.openNoteDetail(${note.id})">
-                <div>
-                  ${sectionBadgeHtml}${processingBadgeHtml}
-                  <div class="card-body" id="card-body-${note.id}">
-                    ${unreadDotHtml}${formatNoteText(note.text, searchQuery)}
+                <div class="${tmdb ? "tmdb-card-layout" : ""}">
+                  ${tmdbPoster}
+                  <div class="tmdb-card-copy">
+                    ${sectionBadgeHtml}${processingBadgeHtml}
+                    <div class="card-body" id="card-body-${note.id}">
+                      ${unreadDotHtml}${formatNoteText(note.text, searchQuery)}
+                    </div>
                   </div>
                 </div>
 
@@ -2360,7 +2462,26 @@
         modalNoteDate.textContent = note.created_at
           ? new Date(note.created_at).toLocaleString("ru-RU")
           : "";
-        modalNoteBody.innerHTML = formatNoteText(note.text);
+        const tmdb = tmdbData(note);
+        if (tmdb) {
+          const genres = Array.isArray(tmdb.genres) ? tmdb.genres.join(", ") : "не указаны";
+          const rating = Number(tmdb.voteAverage || 0).toFixed(1);
+          const votes = Number(tmdb.voteCount || 0);
+          modalNoteBody.innerHTML = `
+            <div class="tmdb-modal-card">
+              ${tmdbPosterHtml(tmdb, true)}
+              <div>
+                <div class="tmdb-facts">
+                  <b>${escapeHtml(tmdb.kind === "tv" ? "Сериал" : "Фильм")}</b> · ${escapeHtml(tmdb.year || "год неизвестен")}<br>
+                  Жанры: ${escapeHtml(genres)}<br>
+                  Рейтинг TMDB: ${escapeHtml(rating)}/10 · ${escapeHtml(votes)} оценок
+                </div>
+                ${formatNoteText(note.text)}
+              </div>
+            </div>`;
+        } else {
+          modalNoteBody.innerHTML = formatNoteText(note.text);
+        }
 
         const matchedSec = note.section 
           ? SECTIONS.find((s) => s.id === note.section)

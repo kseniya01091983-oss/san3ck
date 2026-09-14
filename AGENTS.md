@@ -19,7 +19,7 @@ FastNotes — личный «второй мозг»: Telegram-бот и сай�
 
 - Старая версия: Python, aiogram, aiohttp, SQLAlchemy, SQLite.
 - Облачная версия: TypeScript, Cloudflare Workers, D1, Worker Static Assets.
-- Внешние API: Telegram Bot API, OpenRouter, Tavily Extract.
+- Внешние API: Telegram Bot API, OpenRouter, Tavily Extract, Upstash Vector и TMDB.
 - Тесты Worker: Vitest и официальный Cloudflare Vitest Plugin.
 
 ## Файлы и данные
@@ -31,6 +31,9 @@ FastNotes — личный «второй мозг»: Telegram-бот и сай�
 - Временный SQL-экспорт SQLite хранить только в `worker/.data/` и не коммитить.
 - R2 не используется. Для вложений в D1 хранятся Telegram `file_id`, описание и метаданные; байты остаются в Telegram.
 - Основная модель OpenRouter — `z-ai/glm-5.3-flash` только через `deepinfra`, `novita`, `z-ai`, `gmicloud`; затем DeepSeek и бесплатный резерв.
+- D1 остаётся источником истины. В Upstash отправляются только ID, заголовок, AI-описание и теги; полный текст заметок туда не отправлять.
+- Upstash namespaces изолируются по необратимому хешу Telegram ID. TMDB используется только для чтения.
+- Не добавлять cron, фоновые переиндексации или автоматические повторы внешних запросов.
 
 ## Команды проверки
 

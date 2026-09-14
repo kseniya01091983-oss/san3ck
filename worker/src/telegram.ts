@@ -8,17 +8,18 @@ import {
   createNote,
   deleteNote,
   failStalePendingNotes,
+  findExternalNote,
   getConversationState,
   getNote,
   getNoteApi,
   insertAttachment,
   listAttachmentsForNote,
   listNotes,
-  searchNotesForAnswer,
   setConversationState,
   updateNote,
 } from "./db";
 import { extractPage } from "./tavily";
+import { getTmdbCard, searchTmdb, unambiguousTmdbResult, type TmdbCard, type TmdbMediaHint } from "./tmdb";
 import {
   answerCallback,
   downloadTelegramFile,
@@ -26,6 +27,7 @@ import {
   getTelegramFile,
   sendMessage,
   sendMessageWithResult,
+  sendPhoto,
   sendTyping,
   setBotCommands,
   type InlineButton,
@@ -54,6 +56,7 @@ import {
   tagsFromText,
   truncate,
 } from "./utils";
+import { deleteNoteVector, reindexOwner, searchRagNotes, syncNoteVector } from "./upstash";
 
 const NOTES_PER_PAGE = 5;
 const MAX_VISION_BYTES = 8 * 1024 * 1024;
@@ -166,6 +169,176 @@ async function deliverMessage(
   await sendMessage(env, chatId, text, keyboard);
 }
 
+async function syncVectorQuietly(env: Env, note: NoteRow | null): Promise<void> {
+  if (!note) return;
+  await syncNoteVector(env, note).catch((error) => console.warn("Vector sync failed", error));
+}
+
+function tmdbKindLabel(kind: "movie" | "tv"): string {
+  return kind === "movie" ? "фильм" : "сериал";
+}
+
+function formatTmdbCard(card: TmdbCard): string {
+  const rating = card.voteCount
+    ? `${card.voteAverage.toFixed(1)}/10 · ${card.voteCount} оценок`
+    : "оценок пока нет";
+  const genres = card.genres.length ? truncate(card.genres.join(", "), 180) : "не указаны";
+  return `<b>${escapeHtml(truncate(card.title, 160))}</b>\n${escapeHtml(tmdbKindLabel(card.kind))} · ${escapeHtml(card.year)}\n\n${escapeHtml(truncate(card.overview, 480))}\n\n<b>Жанры:</b> ${escapeHtml(genres)}\n<b>Рейтинг TMDB:</b> ${escapeHtml(rating)}`;
+}
+
+function parseTmdbCard(value: Record<string, unknown>): TmdbCard | null {
+  const card = value.card;
+  if (!card || typeof card !== "object" || Array.isArray(card)) return null;
+  const item = card as Record<string, unknown>;
+  if ((item.kind !== "movie" && item.kind !== "tv") || !Number.isSafeInteger(Number(item.id))) return null;
+  return {
+    id: Number(item.id),
+    kind: item.kind,
+    title: String(item.title || "Без названия"),
+    originalTitle: String(item.originalTitle || ""),
+    year: String(item.year || "год неизвестен"),
+    overview: String(item.overview || "Описание пока отсутствует."),
+    genres: Array.isArray(item.genres) ? item.genres.map(String).filter(Boolean) : [],
+    voteAverage: Number(item.voteAverage || 0),
+    voteCount: Number(item.voteCount || 0),
+    releaseDate: String(item.releaseDate || ""),
+    posterUrl: typeof item.posterUrl === "string" ? item.posterUrl : null,
+    sourceUrl: String(item.sourceUrl || `https://www.themoviedb.org/${item.kind}/${item.id}`),
+  };
+}
+
+async function showTmdbPreview(env: Env, chatId: number, telegramId: number, card: TmdbCard): Promise<void> {
+  await setConversationState(env.DB, telegramId, "tmdb_confirm", null, 30, { card });
+  const keyboard: InlineButton[][] = [[
+    { text: "✅ Сохранить", callback_data: "tmdb_save" },
+    { text: "❌ Отмена", callback_data: "tmdb_cancel" },
+  ]];
+  const caption = `${formatTmdbCard(card)}\n\nСохранить в раздел «Фильмы и сериалы»?`;
+  if (card.posterUrl) {
+    try {
+      await sendPhoto(env, chatId, card.posterUrl, caption, keyboard);
+      return;
+    } catch (error) {
+      console.warn("TMDB poster delivery failed; using text card", error);
+    }
+  }
+  await sendMessage(env, chatId, caption, keyboard);
+}
+
+async function markTmdbFailure(
+  env: Env,
+  telegramId: number,
+  originalText: string,
+  query: string,
+  hint: TmdbMediaHint,
+  error: unknown,
+  noteId?: number | null,
+): Promise<number> {
+  const metadata = {
+    created_from: "telegram",
+    retry_kind: "tmdb",
+    tmdb_query: query,
+    tmdb_media_type: hint,
+    processing_error: error instanceof Error ? error.message : "TMDB недоступен",
+  };
+  if (noteId) {
+    await updateNote(env.DB, telegramId, noteId, { status: "published", processingStatus: "failed", metadata });
+    return noteId;
+  }
+  const row = await createNote(env.DB, {
+    ownerTelegramId: telegramId,
+    type: "recommendation",
+    title: firstLine(originalText),
+    text: originalText,
+    tags: ["кино"],
+    section: "movies",
+    processingStatus: "failed",
+    metadata,
+  });
+  return row.id;
+}
+
+async function beginTmdbLookup(
+  env: Env,
+  chatId: number,
+  telegramId: number,
+  originalText: string,
+  query: string,
+  hint: TmdbMediaHint,
+  pendingNoteId?: number | null,
+  replaceMessageId?: number | null,
+): Promise<void> {
+  try {
+    const results = await searchTmdb(env, query, hint);
+    if (!results.length) throw new Error("TMDB не нашёл подходящий фильм или сериал");
+    const exact = unambiguousTmdbResult(results, query);
+    if (exact) {
+      const card = await getTmdbCard(env, exact.kind, exact.id);
+      if (pendingNoteId) await deleteNote(env.DB, telegramId, pendingNoteId);
+      if (replaceMessageId) {
+        await editMessageText(env, chatId, replaceMessageId, "🎬 Карточка найдена. Проверьте её ниже.").catch(() => undefined);
+      }
+      await showTmdbPreview(env, chatId, telegramId, card);
+      return;
+    }
+
+    if (pendingNoteId) await deleteNote(env.DB, telegramId, pendingNoteId);
+    await setConversationState(env.DB, telegramId, "tmdb_choose", null, 30, {
+      originalText,
+      query,
+      hint,
+    });
+    const buttons = results.map((item) => [{
+      text: `${truncate(item.title, 34)} · ${tmdbKindLabel(item.kind)} · ${item.year}`,
+      callback_data: `tmdb_pick:${item.kind}:${item.id}`,
+    }]);
+    buttons.push([{ text: "❌ Отмена", callback_data: "tmdb_cancel" }]);
+    await deliverMessage(env, chatId, `<b>Нашлось несколько вариантов.</b>\nВыберите нужный:`, buttons, replaceMessageId);
+  } catch (error) {
+    const failedId = await markTmdbFailure(env, telegramId, originalText, query, hint, error, pendingNoteId);
+    await sendNote(env, chatId, failedId, telegramId, replaceMessageId);
+  }
+}
+
+async function saveTmdbCard(env: Env, chatId: number, telegramId: number, card: TmdbCard): Promise<void> {
+  const existing = await findExternalNote(env.DB, telegramId, "tmdb", card.kind, String(card.id));
+  if (existing) {
+    await clearConversationState(env.DB, telegramId);
+    return sendMessage(env, chatId, `ℹ️ «${escapeHtml(card.title)}» уже сохранён как заметка №${existing.id}.`, [[
+      { text: `Открыть №${existing.id}`, callback_data: `view:${existing.id}` },
+    ]]);
+  }
+  try {
+    const row = await createNote(env.DB, {
+      ownerTelegramId: telegramId,
+      type: "recommendation",
+      title: card.title,
+      summary: card.overview,
+      text: `${card.title} (${card.year})\n${tmdbKindLabel(card.kind)}\n\n${card.overview}\n\nЖанры: ${card.genres.join(", ") || "не указаны"}\nРейтинг TMDB: ${card.voteAverage.toFixed(1)}/10 (${card.voteCount} оценок)`,
+      tags: [tmdbKindLabel(card.kind), ...card.genres],
+      section: "movies",
+      sourceUrl: card.sourceUrl,
+      processingStatus: "ready",
+      externalProvider: "tmdb",
+      externalKind: card.kind,
+      externalId: String(card.id),
+      metadata: { created_from: "tmdb", tmdb: card },
+    });
+    await clearConversationState(env.DB, telegramId);
+    await syncVectorQuietly(env, row);
+    await sendMessage(env, chatId, `✅ <b>«${escapeHtml(card.title)}» сохранён в фильмы и сериалы.</b>`, [[
+      { text: `Открыть заметку №${row.id}`, callback_data: `view:${row.id}` },
+    ]]);
+  } catch (error) {
+    const duplicate = await findExternalNote(env.DB, telegramId, "tmdb", card.kind, String(card.id));
+    if (duplicate) {
+      await clearConversationState(env.DB, telegramId);
+      return sendMessage(env, chatId, `ℹ️ Этот фильм или сериал уже сохранён как заметка №${duplicate.id}.`);
+    }
+    throw error;
+  }
+}
+
 async function announceSaved(env: Env, chatId: number, noteId: number): Promise<number | null> {
   try {
     const message = await sendMessageWithResult(
@@ -228,7 +401,7 @@ async function sendNotesPage(env: Env, chatId: number, page: number, telegramId:
 }
 
 async function answerFromNotes(env: Env, chatId: number, question: string, telegramId: number): Promise<void> {
-  const candidates = await searchNotesForAnswer(env.DB, telegramId, question);
+  const candidates = await searchRagNotes(env, telegramId, question);
   const result = await analyzeTextMessage(env, question, candidates, true);
   const buttons = result.intent === "answer_question"
     ? result.source_note_ids.map((id) => [{ text: `Открыть источник №${id}`, callback_data: `view:${id}` }])
@@ -249,7 +422,7 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
     metadata: { created_from: "telegram", original_text_saved: true },
   });
   const progressMessageId = await announceSaved(env, chatId, pending.id);
-  const candidates = await searchNotesForAnswer(env.DB, telegramId, text);
+  const candidates = await searchRagNotes(env, telegramId, text);
   try {
     const analysis = await analyzeTextMessage(env, text, candidates, false);
     if (analysis.intent === "answer_question") {
@@ -260,12 +433,26 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
       await deliverMessage(env, chatId, escapeHtml(analysis.answer), buttons, progressMessageId);
       return;
     }
-    await updateNote(env.DB, telegramId, pending.id, {
+    if (analysis.intent === "media_lookup") {
+      await beginTmdbLookup(
+        env,
+        chatId,
+        telegramId,
+        text,
+        analysis.query,
+        analysis.media_type,
+        pending.id,
+        progressMessageId,
+      );
+      return;
+    }
+    const updated = await updateNote(env.DB, telegramId, pending.id, {
       ...analysis.note,
       status: "published",
       processingStatus: "ready",
       metadata: { created_from: "telegram" },
     });
+    await syncVectorQuietly(env, updated);
     await sendNote(env, chatId, pending.id, telegramId, progressMessageId);
   } catch (error) {
     await updateNote(env.DB, telegramId, pending.id, {
@@ -306,6 +493,7 @@ async function saveLink(env: Env, chatId: number, rawText: string, url: string, 
       metadata: { created_from: "telegram", processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
+  await syncVectorQuietly(env, await getNote(env.DB, telegramId, note.id));
   await sendNote(env, chatId, note.id, telegramId, progressMessageId);
 }
 
@@ -452,6 +640,7 @@ async function saveIncomingFile(
       metadata: { ...baseMetadata, processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
+  await syncVectorQuietly(env, await getNote(env.DB, telegramId, note.id));
   await sendNote(env, chatId, note.id, telegramId, progressMessageId);
 }
 
@@ -465,12 +654,18 @@ async function editNoteText(env: Env, chatId: number, noteId: number, text: stri
   });
   await clearConversationState(env.DB, telegramId);
   if (!updated) return sendMessage(env, chatId, "❌ Заметка не найдена.");
+  await syncVectorQuietly(env, updated);
   await sendMessage(env, chatId, "✨ <b>Заметка успешно обновлена на сайте!</b>");
   await sendNote(env, chatId, noteId, telegramId);
 }
 
 async function removeNote(env: Env, noteId: number, telegramId: number): Promise<boolean> {
-  return deleteNote(env.DB, telegramId, noteId);
+  const existing = await getNote(env.DB, telegramId, noteId);
+  const removed = await deleteNote(env.DB, telegramId, noteId);
+  if (removed && existing?.vector_status !== "not_indexed") {
+    await deleteNoteVector(env, telegramId, noteId).catch((error) => console.warn("Vector delete failed", error));
+  }
+  return removed;
 }
 
 async function retryNote(
@@ -492,6 +687,22 @@ async function retryNote(
     return sendMessage(env, chatId, "⏳ Повторная обработка уже запущена.");
   }
   await sendNote(env, chatId, noteId, telegramId, replaceMessageId);
+  const retryMetadata = parseJson<Record<string, unknown>>(note.metadata_json, {});
+  if (retryMetadata.retry_kind === "tmdb") {
+    await beginTmdbLookup(
+      env,
+      chatId,
+      telegramId,
+      note.text,
+      String(retryMetadata.tmdb_query || note.title),
+      ["movie", "tv", "any"].includes(String(retryMetadata.tmdb_media_type))
+        ? retryMetadata.tmdb_media_type as TmdbMediaHint
+        : "any",
+      noteId,
+      replaceMessageId,
+    );
+    return;
+  }
   try {
     if (note.type === "link" && note.source_url) {
       const extracted = await extractPage(env, note.source_url);
@@ -543,6 +754,7 @@ async function retryNote(
       metadata: { processing_error: error instanceof Error ? error.message : "unknown" },
     });
   }
+  await syncVectorQuietly(env, await getNote(env.DB, telegramId, noteId));
   await sendNote(env, chatId, noteId, telegramId, replaceMessageId);
 }
 
@@ -556,6 +768,16 @@ async function handleCommand(
   const chatId = message.chat.id;
   if (command === "start") return sendStart(env, chatId, telegramId);
   if (command === "help") return sendMessage(env, chatId, HELP_TEXT);
+  if (command === "reindex") {
+    await sendMessage(env, chatId, "⏳ Пересобираю смысловой индекс ваших заметок…");
+    try {
+      const count = await reindexOwner(env, telegramId);
+      return sendMessage(env, chatId, `✅ Смысловой индекс готов: ${count} заметок.`);
+    } catch (error) {
+      console.warn("Upstash reindex failed", error);
+      return sendMessage(env, chatId, "⚠️ Не удалось пересобрать смысловой индекс. Обычный поиск D1 продолжает работать.");
+    }
+  }
   if (command === "cancel") {
     const state = await getConversationState(env.DB, telegramId);
     await clearConversationState(env.DB, telegramId);
@@ -588,6 +810,7 @@ async function handleCommand(
     if (!Number.isInteger(noteId)) return sendMessage(env, chatId, `⚠️ Используйте: <code>/${command} &lt;id&gt;</code>`);
     const note = await updateNote(env.DB, telegramId, noteId, { status: command === "hide" ? "hidden" : "published" });
     if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
+    await syncVectorQuietly(env, note);
     return sendNote(env, chatId, noteId, telegramId);
   }
   if (command === "delete") {
@@ -637,6 +860,42 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
     );
   }
   if (data === "help_full") return sendMessage(env, chatId, HELP_TEXT);
+  if (data === "tmdb_cancel") {
+    await clearConversationState(env.DB, telegramId);
+    return sendMessage(env, chatId, "🚫 Добавление фильма или сериала отменено.");
+  }
+  if (data === "tmdb_save") {
+    const state = await getConversationState(env.DB, telegramId);
+    const card = state?.action === "tmdb_confirm" ? parseTmdbCard(state.payload) : null;
+    if (!card) return sendMessage(env, chatId, "⌛ Карточка устарела. Отправьте название ещё раз.");
+    return saveTmdbCard(env, chatId, telegramId, card);
+  }
+  if (data.startsWith("tmdb_pick:")) {
+    const match = data.match(/^tmdb_pick:(movie|tv):(\d+)$/);
+    const state = await getConversationState(env.DB, telegramId);
+    if (!match || state?.action !== "tmdb_choose") {
+      return sendMessage(env, chatId, "⌛ Выбор устарел. Отправьте название ещё раз.");
+    }
+    try {
+      const card = await getTmdbCard(env, match[1] as "movie" | "tv", Number(match[2]));
+      return showTmdbPreview(env, chatId, telegramId, card);
+    } catch (error) {
+      const originalText = String(state.payload.originalText || state.payload.query || "Фильм или сериал");
+      const hint = ["movie", "tv", "any"].includes(String(state.payload.hint))
+        ? state.payload.hint as TmdbMediaHint
+        : "any";
+      const noteId = await markTmdbFailure(
+        env,
+        telegramId,
+        originalText,
+        String(state.payload.query || originalText),
+        hint,
+        error,
+      );
+      await clearConversationState(env.DB, telegramId);
+      return sendNote(env, chatId, noteId, telegramId);
+    }
+  }
   if (data === "cancel_action") {
     await clearConversationState(env.DB, telegramId);
     return sendMessage(env, chatId, "🚫 Действие отменено.");
@@ -663,7 +922,8 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
   if (action === "toggle_status" && Number.isInteger(id)) {
     const note = await getNote(env.DB, telegramId, id);
     if (!note) return sendMessage(env, chatId, "❌ Заметка не найдена.");
-    await updateNote(env.DB, telegramId, id, { status: note.status === "published" ? "hidden" : "published" });
+    const updated = await updateNote(env.DB, telegramId, id, { status: note.status === "published" ? "hidden" : "published" });
+    await syncVectorQuietly(env, updated);
     return sendNote(env, chatId, id, telegramId);
   }
   if (action === "retry" && Number.isInteger(id)) {

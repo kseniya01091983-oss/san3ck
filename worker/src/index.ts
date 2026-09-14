@@ -17,7 +17,14 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
-      return jsonResponse({ ok: true, service: "fastnotes-second-brain" });
+      return jsonResponse({
+        ok: true,
+        service: "fastnotes-second-brain",
+        integrations: {
+          upstash_configured: Boolean(env.UPSTASH_VECTOR_REST_URL && env.UPSTASH_VECTOR_REST_TOKEN),
+          tmdb_configured: Boolean(env.TMDB_READ_ACCESS_TOKEN),
+        },
+      });
     }
     if (url.pathname === "/telegram/webhook") {
       return handleTelegramWebhook(request, env, ctx);

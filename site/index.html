@@ -1129,6 +1129,24 @@
     }
 
     /* Note Card Body Text */
+    .card-note-title {
+      margin: 0 0 9px;
+      color: var(--text-primary);
+      font-size: 17px;
+      line-height: 1.3;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+      overflow-wrap: anywhere;
+    }
+    .modal-note-title {
+      margin: 0 0 14px;
+      color: var(--text-primary);
+      font-size: 22px;
+      line-height: 1.25;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      overflow-wrap: anywhere;
+    }
     .card-body {
       font-size: 15px;
       line-height: 1.6;
@@ -2185,6 +2203,14 @@
         return clean;
       }
 
+      function separateNoteTitle(note) {
+        const title = String(note && note.title || "").trim();
+        const text = String(note && note.text || "").trim();
+        if (!title) return "";
+        if (text.toLocaleLowerCase("ru-RU").startsWith(title.toLocaleLowerCase("ru-RU"))) return "";
+        return title;
+      }
+
       function escapeRegExp(string) {
         return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       }
@@ -2371,6 +2397,11 @@
             const sourceUrl = safeExternalUrl(note.source_url);
             const tmdb = tmdbData(note);
             const tmdbPoster = tmdb ? tmdbPosterHtml(tmdb) : "";
+            const separateTitle = separateNoteTitle(note);
+            const cardTitleHtml = separateTitle
+              ? `<h3 class="card-note-title">${unreadDotHtml}${escapeHtml(separateTitle)}</h3>`
+              : "";
+            const bodyUnreadDotHtml = separateTitle ? "" : unreadDotHtml;
 
             return `
               <article class="note-card" id="note-${note.id}" onclick="window.openNoteDetail(${note.id})">
@@ -2378,8 +2409,9 @@
                   ${tmdbPoster}
                   <div class="tmdb-card-copy">
                     ${sectionBadgeHtml}${processingBadgeHtml}
+                    ${cardTitleHtml}
                     <div class="card-body" id="card-body-${note.id}">
-                      ${unreadDotHtml}${formatNoteText(note.text, searchQuery)}
+                      ${bodyUnreadDotHtml}${formatNoteText(note.text, searchQuery)}
                     </div>
                   </div>
                 </div>
@@ -2463,6 +2495,10 @@
           ? new Date(note.created_at).toLocaleString("ru-RU")
           : "";
         const tmdb = tmdbData(note);
+        const separateTitle = separateNoteTitle(note);
+        const modalTitleHtml = separateTitle
+          ? `<h2 class="modal-note-title">${escapeHtml(separateTitle)}</h2>`
+          : "";
         if (tmdb) {
           const genres = Array.isArray(tmdb.genres) ? tmdb.genres.join(", ") : "не указаны";
           const rating = Number(tmdb.voteAverage || 0).toFixed(1);
@@ -2471,6 +2507,7 @@
             <div class="tmdb-modal-card">
               ${tmdbPosterHtml(tmdb, true)}
               <div>
+                ${modalTitleHtml}
                 <div class="tmdb-facts">
                   <b>${escapeHtml(tmdb.kind === "tv" ? "Сериал" : "Фильм")}</b> · ${escapeHtml(tmdb.year || "год неизвестен")}<br>
                   Жанры: ${escapeHtml(genres)}<br>
@@ -2480,7 +2517,7 @@
               </div>
             </div>`;
         } else {
-          modalNoteBody.innerHTML = formatNoteText(note.text);
+          modalNoteBody.innerHTML = `${modalTitleHtml}${formatNoteText(note.text)}`;
         }
 
         const matchedSec = note.section 

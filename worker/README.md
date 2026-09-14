@@ -105,8 +105,11 @@ npx wrangler secret put OWNER_TELEGRAM_ID
 
 - регион Ireland;
 - тип `HYBRID`;
-- модель `BGE-M3`;
+- Dense model: `openai/text-embedding-3-small`;
+- Sparse model: `BM25`;
 - similarity `cosine`.
+
+Не выбирайте `Custom`: текущий Worker отправляет в Upstash короткий текст через `upsert-data` и `query-data`, а встроенные модели Upstash сами создают dense- и sparse-векторы. При `Custom` пришлось бы отдельно получать оба вида векторов и менять код. `BM25` слабее работает с русской морфологией, поэтому точный русский поиск дополнительно и независимо выполняется через FTS5 в D1.
 
 В TMDB создайте Application Read Access Token. OAuth пользователя не нужен. Затем из папки `worker` запустите:
 

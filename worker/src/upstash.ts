@@ -27,6 +27,7 @@ async function request<T>(
   namespace: string,
   method: "POST" | "DELETE",
   body?: unknown,
+  allowNotFound = false,
 ): Promise<T> {
   const response = await fetch(endpoint(env, command, namespace), {
     method,
@@ -37,6 +38,7 @@ async function request<T>(
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.timeout(6_000),
   });
+  if (allowNotFound && response.status === 404) return {} as T;
   if (!response.ok) throw new Error(`Upstash ${command}: HTTP ${response.status}`);
   return response.json<T>();
 }
@@ -129,7 +131,7 @@ export async function searchRagNotes(
 export async function reindexOwner(env: Env, ownerTelegramId: number): Promise<number> {
   if (!configured(env)) throw new Error("Upstash Vector Secrets не настроены");
   const namespace = await vectorNamespace(env, ownerTelegramId);
-  await request(env, "reset", namespace, "DELETE");
+  await request(env, "reset", namespace, "DELETE", undefined, true);
   await markOwnerVectorsNotIndexed(env.DB, ownerTelegramId);
   const notes = await listVectorizableNotes(env.DB, ownerTelegramId);
   if (!notes.length) return 0;

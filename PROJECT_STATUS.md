@@ -66,7 +66,7 @@ FastNotes сохраняет личные заметки, ссылки, реко
 - Создана облачная D1 `fastnotes-db`, применены миграции и импортирована 1 старая заметка; в FTS также 1 запись.
 - Первый Worker развёрнут по адресу `https://fastnotes-second-brain.kseniya01091983.workers.dev`.
 - `notes.db` исключена из Git-индекса ветки, но сохранена на компьютере без изменений.
-- TypeScript-проверка проходит; 36 тестов Worker, D1, восстановления зависших записей, команд и уведомлений Telegram, выхода, изоляции пользователей, маршрутизации OpenRouter, Upstash RAG и TMDB проходят.
+- TypeScript-проверка проходит; 37 тестов Worker, D1, восстановления зависших записей, команд и уведомлений Telegram, выхода, изоляции пользователей, маршрутизации OpenRouter, Upstash RAG и TMDB проходят.
 - В Cloudflare Secrets добавлены Telegram, OpenRouter, Tavily, владелец, сессия сайта и webhook; значения не сохранялись в проект.
 - Telegram webhook зарегистрирован на новом Worker.
 - Реальная интеграционная проверка прошла: Telegram/webhook, D1 FTS-поиск, OpenRouter для текста и изображения, Tavily Extract и пересказ ссылки вернули успешный результат.
@@ -99,7 +99,8 @@ FastNotes сохраняет личные заметки, ссылки, реко
 - Код второй части (Upstash RAG и TMDB) реализован, локально проверен, опубликован очищенным коммитом в ветке `cloudflare-migration` репозитория Ксении и развёрнут в Cloudflare.
 - Upstash index и TMDB Read Access Token созданы владельцем; три новых значения сохранены как Cloudflare Worker Secrets и не попадали в проект или чат.
 - Удалённая миграция `0003_upstash_tmdb.sql` применена успешно. После неё в D1 осталось 10 заметок, новые колонки и `payload_json` присутствуют.
-- Текущая опубликованная версия Cloudflare: `33ad899c-1c4a-4f16-8985-05ca35a6019b`. `/health` возвращает `upstash_configured: true` и `tmdb_configured: true`.
+- Первый `/reindex` корректно продолжает работу, даже если пользовательский namespace ещё не существует: пакетный upsert создаёт его автоматически.
+- Текущая опубликованная версия Cloudflare: `74fb29cc-e6fb-4554-9c67-1dc56f1c462a`. `/health` возвращает `upstash_configured: true` и `tmdb_configured: true`.
 
 ## Важные решения
 

@@ -155,6 +155,29 @@ describe("Upstash RAG", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("creates the first namespace when reset reports that it does not exist yet", async () => {
+    await createNote(env.DB, {
+      ownerTelegramId: 74501,
+      type: "note",
+      title: "Первая запись namespace",
+      text: "Создать namespace первым пакетным upsert",
+    });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/reset/")) return new Response("not found", { status: 404 });
+      return Response.json({ result: "Success" });
+    }));
+    try {
+      expect(await reindexOwner(integrationEnv(), 74501)).toBe(1);
+      expect(calls[0]).toContain("/reset/u_");
+      expect(calls[1]).toContain("/upsert-data/u_");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("TMDB integration", () => {

@@ -10,7 +10,7 @@ import {
   getNote,
   setConversationState,
 } from "../src/db";
-import { getTmdbCard, searchTmdb, unambiguousTmdbResult } from "../src/tmdb";
+import { getTmdbCard, searchTmdb, tmdbSearchQueries, unambiguousTmdbResult } from "../src/tmdb";
 import type { Env } from "../src/types";
 import {
   deleteNoteVector,
@@ -181,6 +181,29 @@ describe("Upstash RAG", () => {
 });
 
 describe("TMDB integration", () => {
+  it("tries the original English title separately from the Russian title", async () => {
+    expect(tmdbSearchQueries("Пропавший (Lost)")).toEqual(["Lost", "Пропавший", "Пропавший (Lost)"]);
+    const queries: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const query = new URL(String(input)).searchParams.get("query") || "";
+      queries.push(query);
+      return Response.json({ results: query === "Lost" ? [{
+        id: 4607,
+        media_type: "tv",
+        name: "Остаться в живых",
+        original_name: "Lost",
+        first_air_date: "2004-09-22",
+      }] : [] });
+    }));
+    try {
+      const result = await searchTmdb(integrationEnv(), "Пропавший (Lost)", "tv");
+      expect(queries).toEqual(["Lost"]);
+      expect(result[0]).toMatchObject({ id: 4607, kind: "tv", originalTitle: "Lost" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("filters people and keeps up to three movies or series", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).toContain("/search/multi");

@@ -52,17 +52,36 @@ function normalizeSearchItem(value: Record<string, unknown>): TmdbSearchItem | n
   };
 }
 
+export function tmdbSearchQueries(query: string): string[] {
+  const original = query.trim();
+  const parenthesized = [...original.matchAll(/\(([^)]+)\)/g)]
+    .map((match) => match[1].trim())
+    .filter((value) => /\p{L}/u.test(value));
+  const withoutParentheses = original.replace(/\s*\([^)]*\)\s*/g, " ").trim();
+  const separated = withoutParentheses
+    .split(/\s*(?:[,;/|]|\s[-–—]\s)\s*/)
+    .map((value) => value.trim())
+    .filter((value) => /\p{L}/u.test(value));
+  const latin = separated.filter((value) => /[A-Za-z]/.test(value));
+  const other = separated.filter((value) => !/[A-Za-z]/.test(value));
+  return [...new Set([...parenthesized, ...latin, ...other, withoutParentheses, original].filter(Boolean))].slice(0, 3);
+}
+
 export async function searchTmdb(env: Env, query: string, hint: TmdbMediaHint): Promise<TmdbSearchItem[]> {
-  const payload = await tmdbRequest<{ results?: Record<string, unknown>[] }>(env, "/search/multi", {
-    query,
-    language: "ru-RU",
-    include_adult: "false",
-    page: "1",
-  });
-  return (payload.results || [])
-    .map(normalizeSearchItem)
-    .filter((item): item is TmdbSearchItem => Boolean(item && (hint === "any" || item.kind === hint)))
-    .slice(0, 3);
+  for (const searchQuery of tmdbSearchQueries(query)) {
+    const payload = await tmdbRequest<{ results?: Record<string, unknown>[] }>(env, "/search/multi", {
+      query: searchQuery,
+      language: "ru-RU",
+      include_adult: "false",
+      page: "1",
+    });
+    const results = (payload.results || [])
+      .map(normalizeSearchItem)
+      .filter((item): item is TmdbSearchItem => Boolean(item && (hint === "any" || item.kind === hint)))
+      .slice(0, 3);
+    if (results.length) return results;
+  }
+  return [];
 }
 
 function normalized(value: string): string {

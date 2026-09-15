@@ -18,6 +18,7 @@ import {
   reindexOwner,
   searchRagNotes,
   syncNoteVector,
+  UpstashConnectionError,
   UpstashRequestError,
   vectorNamespace,
   vectorText,
@@ -38,6 +39,8 @@ describe("Upstash RAG", () => {
     expect(reindexFailureMessage(new UpstashRequestError("upsert-data", 401))).toContain("не Read-only Token");
     expect(reindexFailureMessage(new UpstashRequestError("upsert-data", 422))).toContain("Sparse BM25");
     expect(reindexFailureMessage(new Error("secret-value"))).not.toContain("secret-value");
+    expect(reindexFailureMessage(new UpstashConnectionError("reset", "invalid_url"))).toContain("адрес https://");
+    expect(reindexFailureMessage(new UpstashConnectionError("upsert-data", "timeout"))).toContain("загрузки заметок");
   });
 
   it("derives isolated namespaces without exposing Telegram IDs", async () => {
@@ -223,6 +226,46 @@ describe("Upstash RAG", () => {
         .bind(ownerTelegramId)
         .all<{ vector_status: string; total: number }>();
       expect(statuses.results).toEqual([{ vector_status: "synced", total: 23 }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("continues reindexing after a reset timeout and trims copied secrets", async () => {
+    const ownerTelegramId = 74701;
+    const note = await createNote(env.DB, {
+      ownerTelegramId,
+      type: "note",
+      title: "После таймаута reset",
+      summary: "Запись должна попасть в индекс",
+      text: "Полный текст остаётся в D1",
+      tags: ["rag"],
+    });
+    const calls: Array<{ url: string; authorization: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({
+        url,
+        authorization: String((init?.headers as Record<string, string> | undefined)?.Authorization || ""),
+      });
+      if (url.includes("/reset/")) {
+        const timeout = new Error("timed out");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      }
+      return Response.json({ result: "Success" });
+    }));
+    try {
+      const testEnv = integrationEnv({
+        UPSTASH_VECTOR_REST_URL: '  "https://vector.example.test/"  ',
+        UPSTASH_VECTOR_REST_TOKEN: "  'upstash-test-token'  ",
+      });
+      expect(await reindexOwner(testEnv, ownerTelegramId)).toBe(1);
+      expect(calls).toHaveLength(2);
+      expect(calls[0].url).toContain("https://vector.example.test/reset/");
+      expect(calls[1].url).toContain("https://vector.example.test/upsert-data/");
+      expect(calls[1].authorization).toBe("Bearer upstash-test-token");
+      expect(await getNote(env.DB, ownerTelegramId, note.id)).toMatchObject({ vector_status: "synced" });
     } finally {
       vi.unstubAllGlobals();
     }

@@ -6,7 +6,7 @@ import {
   searchNotesForAnswer,
 } from "./db";
 import type { Env, NoteApi, NoteRow } from "./types";
-import { normalizeTags } from "./utils";
+import { normalizeTags, questionSearchText } from "./utils";
 
 interface UpstashQueryResult {
   id: string;
@@ -128,7 +128,7 @@ export async function searchRagNotes(
   limit = 8,
 ): Promise<NoteApi[]> {
   const safeLimit = Math.min(8, Math.max(1, limit));
-  const ftsPromise = searchNotesForAnswer(env.DB, ownerTelegramId, query, safeLimit);
+  const ftsPromise = searchNotesForAnswer(env.DB, ownerTelegramId, questionSearchText(query), safeLimit);
   let semanticIds: number[] = [];
   if (configured(env)) {
     try {
@@ -148,8 +148,10 @@ export async function searchRagNotes(
     }
   }
   const ftsNotes = await ftsPromise;
-  const ids = [...new Set([...semanticIds, ...ftsNotes.map((note) => note.id)])].slice(0, safeLimit);
-  return getPublishedNotesByIds(env.DB, ownerTelegramId, ids);
+  const semanticNotes = await getPublishedNotesByIds(env.DB, ownerTelegramId, semanticIds.slice(0, safeLimit));
+  const combined = new Map<number, NoteApi>();
+  for (const note of [...semanticNotes, ...ftsNotes]) combined.set(note.id, note);
+  return [...combined.values()].slice(0, safeLimit);
 }
 
 export async function reindexOwner(env: Env, ownerTelegramId: number): Promise<number> {

@@ -91,6 +91,45 @@ export function commandParts(text: string): { command: string; args: string } | 
   return { command: match[1].toLowerCase(), args: (match[2] || "").trim() };
 }
 
+const WORD_END = "(?=\\s|[,.!?;:]|$)";
+const SAVE_REQUEST = new RegExp(
+  `^(?:слушай[,.]?\\s+)?(?:пожалуйста[,.]?\\s+)?(?:запиши|сохрани|добавь|создай|зафиксируй)${WORD_END}`,
+  "i",
+);
+const QUESTION_REQUEST = new RegExp(
+  `^(?:слушай[,.]?\\s+)?(?:пожалуйста[,.]?\\s+)?(?:посоветуй|подскажи|расскажи|покажи|ответь|объясни|можно ли|есть ли|как|какая|какие|какой|какую|что|когда|где|кто|почему|зачем|сколько|чем)${WORD_END}`,
+  "i",
+);
+
+/** Быстро отличает явный вопрос от записи, не расходуя запрос OpenRouter. */
+export function looksLikeNaturalQuestion(value: string): boolean {
+  const text = value.trim().replace(/\s+/g, " ");
+  if (!text || SAVE_REQUEST.test(text)) return false;
+  return text.includes("?") || QUESTION_REQUEST.test(text);
+}
+
+/** Убирает разговорные слова и добавляет несколько жанровых синонимов для FTS5. */
+export function questionSearchText(value: string): string {
+  const stopWords = new Set([
+    "а", "бы", "в", "вы", "давай", "для", "же", "и", "из", "ли", "мне", "моих", "мы", "на", "по",
+    "пожалуйста", "подскажи", "покажи", "посоветуй", "про", "расскажи", "с", "своих", "ты", "у", "я",
+  ]);
+  const words = value.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) || [];
+  const result: string[] = [];
+  for (const word of words) {
+    if (stopWords.has(word)) continue;
+    let normalized = word;
+    if (word.startsWith("истор")) normalized = "история";
+    else if (word.startsWith("фантаст")) normalized = "фантастика";
+    else if (word.startsWith("комед") || word.startsWith("смеш")) normalized = "комедия";
+    else if (word.startsWith("ужас") || word.startsWith("страш")) normalized = "ужасы";
+    else if (word.startsWith("романтич")) normalized = "романтика";
+    else if (word.startsWith("мульт")) normalized = "мультфильм";
+    if (!result.includes(normalized)) result.push(normalized);
+  }
+  return result.join(" ") || value;
+}
+
 export function safeFileName(value: string): string {
   const clean = value.replace(/[^a-zA-Zа-яА-ЯёЁ0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return (clean || "file").slice(0, 120);

@@ -1,4 +1,4 @@
-import { analyzeTextMessage, describeImage, structureTextNote, summarizeExtractedLink } from "./ai";
+import { analyzeTextMessage, describeImage, summarizeExtractedLink } from "./ai";
 import { isAllowedTelegramId } from "./access";
 import { createSiteLoginUrl } from "./auth";
 import {
@@ -50,6 +50,7 @@ import {
   extractFirstUrl,
   firstLine,
   jsonResponse,
+  looksLikeNaturalQuestion,
   parseJson,
   safeFileName,
   SECTION_LABELS,
@@ -79,7 +80,7 @@ const HELP_TEXT = `<b>Как пользоваться FastNotes</b>
 🎬 <b>Фильм:</b> <code>Хочу посмотреть Интерстеллар</code>
 ✅ <b>Задача:</b> <code>Завтра позвонить врачу в 10 утра</code>
 🔗 <b>Ссылка:</b> отправьте адрес страницы — бот сделает краткий пересказ.
-💬 <b>Вопрос по базе:</b> <code>/ask какие фильмы я хотела посмотреть?</code>
+💬 <b>Вопрос по базе:</b> <code>Какие фильмы я хотела посмотреть?</code>
 
 <b>Команды</b>
 /notes — мои заметки
@@ -110,8 +111,8 @@ async function sendStart(env: Env, chatId: number, telegramId: number): Promise<
 🔗 ссылку на статью
 🖼 фотографию или изображение
 
-Чтобы задать вопрос по заметкам:
-<code>/ask какие фильмы я хотел посмотреть?</code>
+Чтобы задать вопрос по заметкам, просто напишите его:
+<code>Какие фильмы я хотел посмотреть?</code>
 
 ℹ️ Задачи сохраняются как заметки, но бот пока не присылает напоминания в назначенное время.`,
     [
@@ -402,31 +403,65 @@ async function sendNotesPage(env: Env, chatId: number, page: number, telegramId:
 
 async function answerFromNotes(env: Env, chatId: number, question: string, telegramId: number): Promise<void> {
   const candidates = await searchRagNotes(env, telegramId, question);
-  const result = await analyzeTextMessage(env, question, candidates, true);
-  const buttons = result.intent === "answer_question"
-    ? result.source_note_ids.map((id) => [{ text: `Открыть источник №${id}`, callback_data: `view:${id}` }])
-    : [];
-  await sendMessage(env, chatId, escapeHtml(result.intent === "answer_question" ? result.answer : "В заметках нет ответа."), buttons);
+  try {
+    const result = await analyzeTextMessage(env, question, candidates, true);
+    const buttons = result.intent === "answer_question"
+      ? result.source_note_ids.map((id) => [{ text: `Открыть источник №${id}`, callback_data: `view:${id}` }])
+      : [];
+    await sendMessage(env, chatId, escapeHtml(result.intent === "answer_question" ? result.answer : "В заметках нет ответа."), buttons);
+  } catch (error) {
+    console.warn("OpenRouter question answering unavailable; using D1 results", error);
+    await sendGroundedFallback(env, chatId, candidates);
+  }
 }
 
-async function savePlainText(env: Env, chatId: number, text: string, telegramId: number): Promise<void> {
-  const pending = await createNote(env.DB, {
-    ownerTelegramId: telegramId,
-    type: "note",
-    title: firstLine(text),
-    text,
-    tags: tagsFromText(text),
-    section: "tasks",
-    status: "published",
-    processingStatus: "pending",
-    metadata: { created_from: "telegram", original_text_saved: true },
+async function sendGroundedFallback(
+  env: Env,
+  chatId: number,
+  candidates: NoteApi[],
+  replaceMessageId?: number | null,
+): Promise<void> {
+  if (!candidates.length) {
+    await deliverMessage(
+      env,
+      chatId,
+      "⚠️ Нейросеть временно не ответила. В ваших сохранённых заметках нет подходящей информации.",
+      [],
+      replaceMessageId,
+    );
+    return;
+  }
+  const lines = candidates.map((note, index) => {
+    const detail = truncate(note.summary || note.text, 220);
+    return `${index + 1}. <b>${escapeHtml(note.title)}</b>${detail ? ` — ${escapeHtml(detail)}` : ""}`;
   });
-  const progressMessageId = await announceSaved(env, chatId, pending.id);
-  const candidates = await searchRagNotes(env, telegramId, text);
+  const buttons = candidates.map((note) => [
+    { text: `Открыть заметку №${note.id}`, callback_data: `view:${note.id}` },
+  ]);
+  await deliverMessage(
+    env,
+    chatId,
+    `⚠️ Нейросеть временно не ответила. Вот что нашлось в ваших заметках:\n\n${lines.join("\n")}`,
+    buttons,
+    replaceMessageId,
+  );
+}
+
+async function processPendingPlainText(
+  env: Env,
+  chatId: number,
+  noteId: number,
+  text: string,
+  telegramId: number,
+  progressMessageId?: number | null,
+): Promise<void> {
+  const naturalQuestion = looksLikeNaturalQuestion(text);
+  let candidates: NoteApi[] = [];
   try {
-    const analysis = await analyzeTextMessage(env, text, candidates, false);
+    candidates = await searchRagNotes(env, telegramId, text);
+    const analysis = await analyzeTextMessage(env, text, candidates, naturalQuestion);
     if (analysis.intent === "answer_question") {
-      await deleteNote(env.DB, telegramId, pending.id);
+      await deleteNote(env.DB, telegramId, noteId);
       const buttons = analysis.source_note_ids.map((id) => [
         { text: `Открыть источник №${id}`, callback_data: `view:${id}` },
       ]);
@@ -441,27 +476,49 @@ async function savePlainText(env: Env, chatId: number, text: string, telegramId:
         text,
         analysis.query,
         analysis.media_type,
-        pending.id,
+        noteId,
         progressMessageId,
       );
       return;
     }
-    const updated = await updateNote(env.DB, telegramId, pending.id, {
+    const updated = await updateNote(env.DB, telegramId, noteId, {
       ...analysis.note,
       status: "published",
       processingStatus: "ready",
       metadata: { created_from: "telegram" },
     });
     await syncVectorQuietly(env, updated);
-    await sendNote(env, chatId, pending.id, telegramId, progressMessageId);
+    await sendNote(env, chatId, noteId, telegramId, progressMessageId);
   } catch (error) {
-    await updateNote(env.DB, telegramId, pending.id, {
+    if (naturalQuestion) {
+      await deleteNote(env.DB, telegramId, noteId);
+      console.warn("Natural question processing unavailable; using D1 results", error);
+      await sendGroundedFallback(env, chatId, candidates, progressMessageId);
+      return;
+    }
+    await updateNote(env.DB, telegramId, noteId, {
       status: "published",
       processingStatus: "failed",
       metadata: { created_from: "telegram", processing_error: error instanceof Error ? error.message : "unknown" },
     });
-    await sendNote(env, chatId, pending.id, telegramId, progressMessageId);
+    await sendNote(env, chatId, noteId, telegramId, progressMessageId);
   }
+}
+
+async function savePlainText(env: Env, chatId: number, text: string, telegramId: number): Promise<void> {
+  const pending = await createNote(env.DB, {
+    ownerTelegramId: telegramId,
+    type: "note",
+    title: firstLine(text),
+    text,
+    tags: tagsFromText(text),
+    section: "tasks",
+    status: "published",
+    processingStatus: "pending",
+    metadata: { created_from: "telegram", original_text_saved: true, retry_kind: "auto_text" },
+  });
+  const progressMessageId = await announceSaved(env, chatId, pending.id);
+  await processPendingPlainText(env, chatId, pending.id, text, telegramId, progressMessageId);
 }
 
 async function saveLink(env: Env, chatId: number, rawText: string, url: string, telegramId: number): Promise<void> {
@@ -703,6 +760,10 @@ async function retryNote(
     );
     return;
   }
+  if (note.type !== "link" && note.type !== "image" && note.type !== "file") {
+    await processPendingPlainText(env, chatId, noteId, note.text, telegramId, replaceMessageId);
+    return;
+  }
   try {
     if (note.type === "link" && note.source_url) {
       const extracted = await extractPage(env, note.source_url);
@@ -744,9 +805,6 @@ async function retryNote(
       } else {
         await updateNote(env.DB, telegramId, noteId, { processingStatus: "ready" });
       }
-    } else {
-      const structured = await structureTextNote(env, note.text);
-      await updateNote(env.DB, telegramId, noteId, { ...structured, processingStatus: "ready" });
     }
   } catch (error) {
     await updateNote(env.DB, telegramId, noteId, {
@@ -856,7 +914,7 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
     return sendMessage(
       env,
       chatId,
-      "💬 Напишите команду и вопрос одним сообщением.\n\nНапример: <code>/ask какие фильмы я хотела посмотреть?</code>\n\nЯ отвечу только по вашим сохранённым заметкам.",
+      "💬 Просто напишите вопрос обычным сообщением.\n\nНапример: <code>Какие фильмы я хотела посмотреть?</code>\n\nКоманда /ask тоже продолжает работать. Я отвечу только по вашим сохранённым заметкам.",
     );
   }
   if (data === "help_full") return sendMessage(env, chatId, HELP_TEXT);

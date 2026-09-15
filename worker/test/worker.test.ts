@@ -6,7 +6,7 @@ import { isAllowedTelegramId } from "../src/access";
 import { createSiteLoginUrl, exchangeSiteToken, getSiteSessionTelegramId, hasSiteSession } from "../src/auth";
 import { structureTextNote, validateGroundedAnswer } from "../src/ai";
 import { claimFailedNoteForRetry, claimTelegramUpdate, createNote, failStalePendingNotes, getConversationState, getNote, getNoteApi, insertAttachment, listNotes, searchNotesForAnswer, setConversationState, updateNote } from "../src/db";
-import { extractFirstUrl, normalizeTags } from "../src/utils";
+import { extractFirstUrl, looksLikeNaturalQuestion, normalizeTags, questionSearchText } from "../src/utils";
 
 describe("FastNotes helpers", () => {
   it("normalizes tags without duplicates", () => {
@@ -16,6 +16,14 @@ describe("FastNotes helpers", () => {
   it("extracts the first URL and removes trailing punctuation", () => {
     expect(extractFirstUrl("Сохрани https://example.com/page). И ещё https://second.test"))
       .toBe("https://example.com/page");
+  });
+
+  it("recognizes natural questions without confusing explicit save requests", () => {
+    expect(looksLikeNaturalQuestion("Посоветуй мне, пожалуйста, исторический сериал.")).toBe(true);
+    expect(looksLikeNaturalQuestion("У меня есть сериал про фантастику?")).toBe(true);
+    expect(looksLikeNaturalQuestion("Запиши купить молоко?")).toBe(false);
+    expect(looksLikeNaturalQuestion("Добавь сериал Шерлок")).toBe(false);
+    expect(questionSearchText("Посоветуй мне исторический сериал")).toBe("история сериал");
   });
 });
 
@@ -386,7 +394,7 @@ describe("Telegram usability", () => {
       expect(welcomeText).toContain("позвонить врачу");
       expect(welcomeText).toContain("ссылку на статью");
       expect(welcomeText).toContain("фотографию");
-      expect(welcomeText).toContain("/ask какие фильмы");
+      expect(welcomeText).toContain("Какие фильмы я хотел посмотреть?");
       expect(welcomeText).toContain("пока не присылает напоминания");
       const keyboard = welcome?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string; url?: string }>> } | undefined;
       const buttons = keyboard?.inline_keyboard?.flat() || [];
@@ -442,7 +450,7 @@ describe("Telegram usability", () => {
       expect(telegramCalls.some((call) => call.method === "setMyCommands")).toBe(false);
       const help = telegramCalls.find((call) => call.method === "sendMessage");
       expect(String(help?.payload.text)).toContain("Интерстеллар");
-      expect(String(help?.payload.text)).toContain("/ask какие фильмы");
+      expect(String(help?.payload.text)).toContain("Какие фильмы я хотела посмотреть?");
       expect(String(help?.payload.text)).toContain("пока не присылает напоминание");
     } finally {
       vi.unstubAllGlobals();
@@ -573,6 +581,105 @@ describe("Telegram processing feedback", () => {
         text: "Уникальная заметка при ошибке 82002",
         processing_status: "failed",
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not save a natural question as failed when OpenRouter is unavailable", async () => {
+    const source = await createNote(env.DB, {
+      ownerTelegramId: 10001,
+      type: "recommendation",
+      title: "Корона",
+      summary: "Исторический сериал о британской королевской семье",
+      text: "Сериал в жанре исторической драмы",
+      tags: ["история", "сериал"],
+      section: "movies",
+      processingStatus: "ready",
+    });
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("api.telegram.org")) {
+        const method = url.split("/").at(-1) || "";
+        const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+        telegramCalls.push({ method, payload });
+        return Response.json({ ok: true, result: { message_id: 94001 } });
+      }
+      return new Response("temporarily unavailable", { status: 503 });
+    }));
+
+    try {
+      const question = "Посоветуй мне, пожалуйста, исторический сериал.";
+      expect((await sendUpdate({
+        update_id: 82003,
+        message: { message_id: 3, chat: { id: 10001 }, from: { id: 10001 }, text: question },
+      })).status).toBe(200);
+
+      const completion = telegramCalls.find((call) => call.method === "editMessageText");
+      expect(String(completion?.payload.text)).toContain("Нейросеть временно не ответила");
+      expect(String(completion?.payload.text)).toContain("Корона");
+      const keyboard = completion?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string }>> } | undefined;
+      expect(keyboard?.inline_keyboard?.flat().some((button) => button.callback_data === `view:${source.id}`)).toBe(true);
+
+      const savedQuestion = await listNotes(env.DB, 10001, { query: question, status: null });
+      expect(savedQuestion.items.some((note) => note.text === question)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries an old failed question through full intent classification", async () => {
+    const source = await createNote(env.DB, {
+      ownerTelegramId: 10001,
+      type: "recommendation",
+      title: "Чернобыль",
+      summary: "Исторический мини-сериал",
+      text: "Мини-сериал основан на событиях катастрофы",
+      tags: ["история", "сериал"],
+      section: "movies",
+      processingStatus: "ready",
+    });
+    const failed = await createNote(env.DB, {
+      ownerTelegramId: 10001,
+      type: "note",
+      title: "Вопрос",
+      text: "Какой исторический сериал посмотреть?",
+      section: "tasks",
+      processingStatus: "failed",
+    });
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("api.telegram.org")) {
+        const method = url.split("/").at(-1) || "";
+        const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+        telegramCalls.push({ method, payload });
+        return Response.json({ ok: true, result: { message_id: 95001 } });
+      }
+      if (url.includes("openrouter.ai")) {
+        return Response.json({ choices: [{ message: { content: JSON.stringify({
+          intent: "answer_question",
+          answer: "В заметках есть сериал «Чернобыль».",
+          source_note_ids: [source.id],
+        }) } }] });
+      }
+      return new Response("temporarily unavailable", { status: 503 });
+    }));
+
+    try {
+      expect((await sendUpdate({
+        update_id: 82004,
+        callback_query: {
+          id: "retry-old-question",
+          from: { id: 10001 },
+          message: { message_id: 4, chat: { id: 10001 } },
+          data: `retry:${failed.id}`,
+        },
+      })).status).toBe(200);
+
+      expect(await getNote(env.DB, 10001, failed.id)).toBeNull();
+      expect(telegramCalls.some((call) => String(call.payload.text).includes("Чернобыль"))).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

@@ -25,7 +25,7 @@ export type MessageAnalysis =
 const GLM_PROVIDERS = ["deepinfra", "novita", "z-ai", "gmicloud"] as const;
 const TEXT_FALLBACK_MODEL = "deepseek/deepseek-v4-flash-0731";
 const FREE_FALLBACK_MODEL = "openrouter/free";
-const ATTEMPT_TIMEOUTS_MS = [15_000, 5_000, 2_500] as const;
+const ATTEMPT_TIMEOUTS_MS = [18_000, 8_000, 2_000] as const;
 
 function configuredModel(env: Env): string {
   if (!env.OPENROUTER_MODEL || env.OPENROUTER_MODEL === "SET_AFTER_SELECTION") {

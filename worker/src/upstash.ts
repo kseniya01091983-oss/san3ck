@@ -3,6 +3,7 @@ import {
   listVectorizableNotes,
   markOwnerVectorsNotIndexed,
   markNoteVector,
+  markNotesVectorSynced,
   searchNotesForAnswer,
 } from "./db";
 import type { Env, NoteApi, NoteRow } from "./types";
@@ -12,6 +13,10 @@ interface UpstashQueryResult {
   id: string;
   score: number;
 }
+
+const DEFAULT_TIMEOUT_MS = 6_000;
+const REINDEX_TIMEOUT_MS = 20_000;
+const REINDEX_BATCH_SIZE = 10;
 
 export class UpstashRequestError extends Error {
   constructor(
@@ -52,6 +57,7 @@ async function request<T>(
   method: "POST" | "DELETE",
   body?: unknown,
   allowNotFound = false,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<T> {
   const response = await fetch(endpoint(env, command, namespace), {
     method,
@@ -60,7 +66,7 @@ async function request<T>(
       "Content-Type": "application/json",
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(6_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (allowNotFound && response.status === 404) return {} as T;
   if (!response.ok) throw new UpstashRequestError(command, response.status);
@@ -161,14 +167,20 @@ export async function reindexOwner(env: Env, ownerTelegramId: number): Promise<n
   await markOwnerVectorsNotIndexed(env.DB, ownerTelegramId);
   const notes = await listVectorizableNotes(env.DB, ownerTelegramId);
   if (!notes.length) return 0;
-  const payload = notes.map((note) => ({
-    id: String(note.id),
-    data: vectorText(note),
-    metadata: { note_id: note.id },
-  }));
-  await request(env, "upsert-data", namespace, "POST", payload);
-  for (const note of notes) {
-    await markNoteVector(env.DB, ownerTelegramId, note.id, "synced", await vectorHash(note), new Date().toISOString());
+  for (let offset = 0; offset < notes.length; offset += REINDEX_BATCH_SIZE) {
+    const batch = notes.slice(offset, offset + REINDEX_BATCH_SIZE);
+    const payload = batch.map((note) => ({
+      id: String(note.id),
+      data: vectorText(note),
+      metadata: { note_id: note.id },
+    }));
+    await request(env, "upsert-data", namespace, "POST", payload, false, REINDEX_TIMEOUT_MS);
+    const indexedAt = new Date().toISOString();
+    const statusUpdates = await Promise.all(batch.map(async (note) => ({
+      id: note.id,
+      contentHash: await vectorHash(note),
+    })));
+    await markNotesVectorSynced(env.DB, ownerTelegramId, statusUpdates, indexedAt);
   }
   return notes.length;
 }

@@ -305,6 +305,22 @@ export async function markNoteVector(
     .run();
 }
 
+export async function markNotesVectorSynced(
+  db: D1Database,
+  ownerTelegramId: number,
+  notes: Array<{ id: number; contentHash: string }>,
+  indexedAt: string,
+): Promise<void> {
+  if (!notes.length) return;
+  await db.batch(notes.map((note) => db
+    .prepare(
+      `UPDATE notes
+       SET vector_status = 'synced', vector_content_hash = ?, vector_indexed_at = ?
+       WHERE id = ? AND owner_telegram_id = ?`,
+    )
+    .bind(note.contentHash, indexedAt, note.id, ownerTelegramId)));
+}
+
 export async function markOwnerVectorsNotIndexed(db: D1Database, ownerTelegramId: number): Promise<void> {
   await db
     .prepare(

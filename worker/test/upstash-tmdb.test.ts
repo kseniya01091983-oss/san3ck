@@ -186,6 +186,47 @@ describe("Upstash RAG", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("reindexes larger collections in batches of ten", async () => {
+    const ownerTelegramId = 74601;
+    for (let index = 1; index <= 23; index += 1) {
+      await createNote(env.DB, {
+        ownerTelegramId,
+        type: "recommendation",
+        title: `Карточка ${index}`,
+        summary: `Краткое описание ${index}`,
+        text: `Закрытый полный текст ${index}`,
+        tags: ["подборка"],
+      });
+    }
+    await createNote(env.DB, {
+      ownerTelegramId: 74602,
+      type: "note",
+      title: "Чужая карточка",
+      text: "Не отправлять в namespace владельца",
+    });
+    const upsertBodies: Array<Array<{ id: string; data: string }>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/upsert-data/")) {
+        upsertBodies.push(JSON.parse(String(init?.body || "[]")) as Array<{ id: string; data: string }>);
+      }
+      return Response.json({ result: "Success" });
+    }));
+    try {
+      expect(await reindexOwner(integrationEnv(), ownerTelegramId)).toBe(23);
+      expect(upsertBodies.map((batch) => batch.length)).toEqual([10, 10, 3]);
+      const serialized = JSON.stringify(upsertBodies);
+      expect(serialized).not.toContain("Закрытый полный текст");
+      expect(serialized).not.toContain("Чужая карточка");
+      const statuses = await env.DB
+        .prepare("SELECT vector_status, COUNT(*) AS total FROM notes WHERE owner_telegram_id = ? GROUP BY vector_status")
+        .bind(ownerTelegramId)
+        .all<{ vector_status: string; total: number }>();
+      expect(statuses.results).toEqual([{ vector_status: "synced", total: 23 }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("TMDB integration", () => {

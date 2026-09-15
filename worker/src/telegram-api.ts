@@ -114,6 +114,14 @@ export async function setBotCommands(env: Env, commands: TelegramBotCommand[]): 
   await telegramRequest(env, "setMyCommands", { commands });
 }
 
+export async function setBotDescription(env: Env, description: string): Promise<void> {
+  await telegramRequest(env, "setMyDescription", { description });
+}
+
+export async function setBotShortDescription(env: Env, shortDescription: string): Promise<void> {
+  await telegramRequest(env, "setMyShortDescription", { short_description: shortDescription });
+}
+
 export async function sendTyping(env: Env, chatId: number): Promise<void> {
   await telegramRequest(env, "sendChatAction", { chat_id: chatId, action: "typing" });
 }

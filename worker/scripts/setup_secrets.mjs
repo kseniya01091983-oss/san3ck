@@ -6,6 +6,8 @@ import { resolve } from "node:path";
 const host = "127.0.0.1";
 const port = 8790;
 const workerUrl = "https://fastnotes-second-brain.kseniya01091983.workers.dev";
+const botDescription = "Нажмите Start / Запустить — бот сразу покажет короткую инструкцию. FastNotes сохраняет заметки, ищет ответы по вашей базе и помогает добавлять фильмы и сериалы.";
+const botShortDescription = "Заметки, смысловой поиск и фильмы. Нажмите Start / Запустить, чтобы начать.";
 const csrfToken = randomBytes(24).toString("base64url");
 const wranglerBin = resolve(process.cwd(), "node_modules", "wrangler", "bin", "wrangler.js");
 
@@ -124,6 +126,8 @@ const server = createServer(async (request, response) => {
       allowed_updates: ["message", "callback_query"],
       drop_pending_updates: false,
     });
+    await telegramRequest(telegram, "setMyDescription", { description: botDescription });
+    await telegramRequest(telegram, "setMyShortDescription", { short_description: botShortDescription });
     response.end(page("Готово: секреты добавлены, Telegram webhook подключён. Эту страницу можно закрыть.", true));
     setTimeout(() => server.close(), 1500);
   } catch (error) {

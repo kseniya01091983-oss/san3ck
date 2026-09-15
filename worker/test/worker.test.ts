@@ -380,13 +380,19 @@ describe("Telegram usability", () => {
       })).status).toBe(200);
       const notesAfter = await listNotes(env.DB, 10001, { status: null });
       expect(notesAfter.total).toBe(notesBefore.total);
-      expect(telegramCalls.map((call) => call.method)).toEqual(["setMyCommands", "sendMessage"]);
+      expect(telegramCalls.map((call) => call.method)).toEqual([
+        "setMyCommands", "setMyDescription", "setMyShortDescription", "sendMessage",
+      ]);
 
       const menu = telegramCalls.find((call) => call.method === "setMyCommands");
       const commands = menu?.payload.commands as Array<{ command?: string }> | undefined;
       expect(commands?.map((command) => command.command)).toEqual(expect.arrayContaining([
         "notes", "ask", "site", "edit", "hide", "show", "delete", "cancel", "help",
       ]));
+      expect(String(telegramCalls.find((call) => call.method === "setMyDescription")?.payload.description))
+        .toContain("Start / Запустить");
+      expect(String(telegramCalls.find((call) => call.method === "setMyShortDescription")?.payload.short_description))
+        .toContain("Start / Запустить");
 
       const welcome = telegramCalls.find((call) => call.method === "sendMessage");
       const welcomeText = String(welcome?.payload.text);
@@ -403,6 +409,95 @@ describe("Telegram usability", () => {
       expect(buttons.some((button) => button.callback_data === "help_ask")).toBe(true);
       expect(buttons.some((button) => button.callback_data === "help_full")).toBe(true);
       expect(buttons.some((button) => String(button.url).startsWith("https://fastnotes.test/auth/site?"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("shows the teacher a short isolated homework checklist", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = String(input).split("/").at(-1) || "";
+      telegramCalls.push({ method, payload: JSON.parse(String(init?.body || "{}")) as Record<string, unknown> });
+      return Response.json({ ok: true, result: method === "sendMessage" ? { message_id: 93005 } : true });
+    }));
+
+    try {
+      expect((await sendUpdate({
+        update_id: 83005,
+        message: { message_id: 5, chat: { id: 126041348 }, from: { id: 126041348 }, text: "/start" },
+      })).status).toBe(200);
+      const welcome = telegramCalls.find((call) => call.method === "sendMessage");
+      const welcomeText = String(welcome?.payload.text);
+      expect(welcomeText).toContain("проверка домашнего задания");
+      expect(welcomeText).toContain("отдельное пространство");
+      expect(welcomeText).toContain("Посоветуй исторический сериал?");
+      expect(welcomeText).toContain("Хочу посмотреть Интерстеллар");
+      const keyboard = welcome?.payload.reply_markup as { inline_keyboard?: Array<Array<{ callback_data?: string; url?: string }>> } | undefined;
+      const buttons = keyboard?.inline_keyboard?.flat() || [];
+      expect(buttons).toHaveLength(4);
+      expect(buttons.some((button) => button.callback_data === "teacher_reindex")).toBe(true);
+      expect(buttons.some((button) => button.callback_data === "page:0")).toBe(true);
+      expect(buttons.some((button) => button.callback_data === "help_full")).toBe(true);
+      expect(buttons.some((button) => String(button.url).startsWith("https://fastnotes.test/auth/site?"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("runs the teacher reindex only after the button is pressed", async () => {
+    const telegramCalls: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    const upstashCalls: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith("https://vector.example.test")) {
+        upstashCalls.push({ url, method: String(init?.method || "GET") });
+        return Response.json({ result: "Success" });
+      }
+      const method = url.split("/").at(-1) || "";
+      telegramCalls.push({ method, payload: JSON.parse(String(init?.body || "{}")) as Record<string, unknown> });
+      return Response.json({ ok: true, result: method === "sendMessage" ? { message_id: 93006 } : true });
+    }));
+
+    try {
+      await createNote(env.DB, {
+        ownerTelegramId: 126041348,
+        type: "recommendation",
+        title: "Исторический сериал преподавателя",
+        summary: "Запись для проверки отдельного смыслового индекса",
+        text: "Исторический сериал",
+        tags: ["история", "сериал"],
+      });
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(new Request("https://fastnotes.test/telegram/webhook", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret",
+        },
+        body: JSON.stringify({
+          update_id: 83006,
+          callback_query: {
+            id: "callback-teacher-reindex",
+            from: { id: 126041348 },
+            message: { message_id: 6, chat: { id: 126041348 } },
+            data: "teacher_reindex",
+          },
+        }),
+      }), {
+        ...env,
+        UPSTASH_VECTOR_REST_URL: "https://vector.example.test",
+        UPSTASH_VECTOR_REST_TOKEN: "test-vector-token",
+      }, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(response.status).toBe(200);
+      expect(telegramCalls.map((call) => call.method)).toEqual([
+        "answerCallbackQuery", "sendMessage", "sendMessage",
+      ]);
+      expect(String(telegramCalls[1]?.payload.text)).toContain("Подготавливаю смысловой поиск");
+      expect(String(telegramCalls[2]?.payload.text)).toContain("Смысловой поиск готов");
+      expect(upstashCalls.some((call) => call.method === "DELETE" && call.url.includes("/reset"))).toBe(true);
+      expect(upstashCalls.some((call) => call.method === "POST" && call.url.includes("/upsert-data"))).toBe(true);
     } finally {
       vi.unstubAllGlobals();
     }

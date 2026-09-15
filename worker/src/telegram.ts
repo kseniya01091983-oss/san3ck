@@ -1,5 +1,5 @@
 import { analyzeTextMessage, describeImage, summarizeExtractedLink } from "./ai";
-import { isAllowedTelegramId } from "./access";
+import { isAllowedTelegramId, teacherTelegramId } from "./access";
 import { createSiteLoginUrl } from "./auth";
 import {
   claimFailedNoteForRetry,
@@ -30,6 +30,8 @@ import {
   sendPhoto,
   sendTyping,
   setBotCommands,
+  setBotDescription,
+  setBotShortDescription,
   type InlineButton,
   type TelegramBotCommand,
 } from "./telegram-api";
@@ -93,11 +95,45 @@ const HELP_TEXT = `<b>Как пользоваться FastNotes</b>
 
 ℹ️ Текст со временем сохраняется как задача, но бот пока не присылает напоминание в назначенный час.`;
 
+const BOT_DESCRIPTION = "Нажмите Start / Запустить — бот сразу покажет короткую инструкцию. FastNotes сохраняет заметки, ищет ответы по вашей базе и помогает добавлять фильмы и сериалы.";
+const BOT_SHORT_DESCRIPTION = "Заметки, смысловой поиск и фильмы. Нажмите Start / Запустить, чтобы начать.";
+
+async function configureBotPresentation(env: Env): Promise<void> {
+  const results = await Promise.allSettled([
+    setBotCommands(env, BOT_COMMANDS),
+    setBotDescription(env, BOT_DESCRIPTION),
+    setBotShortDescription(env, BOT_SHORT_DESCRIPTION),
+  ]);
+  for (const result of results) {
+    if (result.status === "rejected") console.warn("Telegram bot presentation setup failed", result.reason);
+  }
+}
+
 async function sendStart(env: Env, chatId: number, telegramId: number): Promise<void> {
-  await setBotCommands(env, BOT_COMMANDS).catch((error) => {
-    console.warn("Telegram setMyCommands failed", error);
-  });
+  await configureBotPresentation(env);
   const siteUrl = await createSiteLoginUrl(env, telegramId);
+  if (telegramId === teacherTelegramId(env)) {
+    await sendMessage(
+      env,
+      chatId,
+      `<b>👋 FastNotes — проверка домашнего задания</b>
+
+У вас отдельное пространство: ваши заметки не видны владельцу бота.
+
+<b>Проверка за 4 шага:</b>
+1. Нажмите «Подготовить смысловой поиск».
+2. Напишите: <code>Посоветуй исторический сериал?</code>
+3. Напишите: <code>Хочу посмотреть Интерстеллар</code> и сохраните карточку.
+4. Откройте сайт и посмотрите свои заметки.`,
+      [
+        [{ text: "🧠 Подготовить смысловой поиск", callback_data: "teacher_reindex" }],
+        [{ text: "🌐 Открыть сайт", url: siteUrl }],
+        [{ text: "📝 Мои заметки", callback_data: "page:0" }],
+        [{ text: "📖 Краткая справка", callback_data: "help_full" }],
+      ],
+    );
+    return;
+  }
   await sendMessage(
     env,
     chatId,
@@ -122,6 +158,17 @@ async function sendStart(env: Env, chatId: number, telegramId: number): Promise<
       [{ text: "📖 Полная справка", callback_data: "help_full" }],
     ],
   );
+}
+
+async function rebuildSemanticIndex(env: Env, chatId: number, telegramId: number): Promise<void> {
+  await sendMessage(env, chatId, "⏳ Подготавливаю смысловой поиск по вашим заметкам…");
+  try {
+    const count = await reindexOwner(env, telegramId);
+    await sendMessage(env, chatId, `✅ Смысловой поиск готов: ${count} заметок.`);
+  } catch (error) {
+    console.warn("Upstash reindex failed", error);
+    await sendMessage(env, chatId, reindexFailureMessage(error));
+  }
 }
 
 function noteKeyboard(note: NoteApi | NoteRow): InlineButton[][] {
@@ -827,14 +874,7 @@ async function handleCommand(
   if (command === "start") return sendStart(env, chatId, telegramId);
   if (command === "help") return sendMessage(env, chatId, HELP_TEXT);
   if (command === "reindex") {
-    await sendMessage(env, chatId, "⏳ Пересобираю смысловой индекс ваших заметок…");
-    try {
-      const count = await reindexOwner(env, telegramId);
-      return sendMessage(env, chatId, `✅ Смысловой индекс готов: ${count} заметок.`);
-    } catch (error) {
-      console.warn("Upstash reindex failed", error);
-      return sendMessage(env, chatId, reindexFailureMessage(error));
-    }
+    return rebuildSemanticIndex(env, chatId, telegramId);
   }
   if (command === "cancel") {
     const state = await getConversationState(env.DB, telegramId);
@@ -910,6 +950,7 @@ async function handleCallback(env: Env, callback: TelegramCallbackQuery, telegra
   await answerCallback(env, callback.id).catch(() => undefined);
   if (!chatId) return;
   if (data === "noop") return;
+  if (data === "teacher_reindex") return rebuildSemanticIndex(env, chatId, telegramId);
   if (data === "help_ask") {
     return sendMessage(
       env,
